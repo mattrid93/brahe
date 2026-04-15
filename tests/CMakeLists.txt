@@ -7,7 +7,12 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(Catch2)
 
-add_executable(brahe_tests test_main.cpp)
+add_executable(brahe_tests
+    test_types.cpp
+    test_body_builder.cpp
+    test_ephemeris.cpp
+    test_frame_transforms.cpp
+)
 target_link_libraries(brahe_tests PRIVATE brahe_lib Catch2::Catch2WithMain)
 target_compile_options(brahe_tests PRIVATE -Wall -Wextra -Wpedantic)
 
