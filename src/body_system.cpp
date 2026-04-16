@@ -8,6 +8,12 @@
 
 namespace brahe {
 
+namespace {
+
+constexpr BodyId kEmptyChildrenSentinel = InvalidBody;
+
+} // namespace
+
 // --- BodySystemBuilder ---
 
 void BodySystemBuilder::add_body(const BodyDef& def) { defs_.push_back(def); }
@@ -253,14 +259,16 @@ size_t BodySystem::depth(BodyId id) const {
 
 const BodyId* BodySystem::children_begin(BodyId id) const {
     size_t idx = find_index(id);
-    if (idx == SIZE_MAX || bodies_[idx].children_count == 0) return nullptr;
-    return &children_[bodies_[idx].children_start];
+    if (idx == SIZE_MAX) return nullptr;
+    if (bodies_[idx].children_count == 0) return &kEmptyChildrenSentinel;
+    return children_.data() + bodies_[idx].children_start;
 }
 
 const BodyId* BodySystem::children_end(BodyId id) const {
     size_t idx = find_index(id);
-    if (idx == SIZE_MAX || bodies_[idx].children_count == 0) return nullptr;
-    return &children_[bodies_[idx].children_start + bodies_[idx].children_count];
+    if (idx == SIZE_MAX) return nullptr;
+    if (bodies_[idx].children_count == 0) return &kEmptyChildrenSentinel;
+    return children_.data() + bodies_[idx].children_start + bodies_[idx].children_count;
 }
 
 } // namespace brahe

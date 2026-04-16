@@ -393,6 +393,22 @@ TEST_CASE("SiblingTraversalOrder_IsAscendingBodyId", "[builder]") {
     REQUIRE(children[2] == 30);
 }
 
+TEST_CASE("ChildTraversalRange_ForLeafBodyIsStableEmptyRange", "[builder]") {
+    BodySystemBuilder b;
+    add_star_planet_moon(b);
+
+    BodySystem sys;
+    REQUIRE(b.build(sys) == SolveStatus::Ok);
+
+    const BodyId* begin = sys.children_begin(2);
+    const BodyId* end = sys.children_end(2);
+
+    REQUIRE(begin != nullptr);
+    REQUIRE(end != nullptr);
+    REQUIRE(begin == end);
+    REQUIRE(static_cast<size_t>(end - begin) == 0);
+}
+
 TEST_CASE("DepthCache_IsCorrectForNestedTree", "[builder]") {
     BodySystemBuilder b;
     add_star_planet_moon(b);
