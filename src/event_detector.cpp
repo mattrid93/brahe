@@ -346,12 +346,12 @@ SolveStatus EventDetector::find_next_event(const EventSearchRequest& req,
             BodyId child_id = *p;
             double f_ch_lo = f_child_lo[ci];
             double f_ch_hi = eval_child(s_hi, child_id, t_hi);
+            auto f_of_t = [&, child_id](double t) {
+                State2 s;
+                (void)propagate_by(mu, req.initial_state, t - req.start_time, s);
+                return eval_child(s, child_id, t);
+            };
             if (f_ch_lo > 0.0 && f_ch_hi <= 0.0) {
-                auto f_of_t = [&, child_id](double t) {
-                    State2 s;
-                    (void)propagate_by(mu, req.initial_state, t - req.start_time, s);
-                    return eval_child(s, child_id, t);
-                };
                 double t_root = t_lo;
                 SolveStatus rs = detail::refine_root_bisection(
                     f_of_t, t_lo, t_hi, f_ch_lo, f_ch_hi, root_eps, max_iter, t_root);
@@ -367,6 +367,33 @@ SolveStatus EventDetector::find_next_event(const EventSearchRequest& req,
                     consider(ev);
                 }
                 // Refinement failure: leave the default TimeLimit / best-so-far alone.
+            } else if (f_ch_lo > 0.0 && f_ch_hi > 0.0) {
+                double t_min = t_lo;
+                double f_min = f_ch_lo;
+                SolveStatus ms = detail::refine_minimum(
+                    f_of_t, t_lo, t_hi, root_eps, max_iter, t_min, f_min);
+                if (ms == SolveStatus::Ok && f_min <= root_eps) {
+                    double t_event = t_min;
+                    if (f_min <= 0.0 && t_min > t_lo + time_eps) {
+                        double t_root = t_lo;
+                        SolveStatus rs = detail::refine_root_bisection(
+                            f_of_t, t_lo, t_min, f_ch_lo, f_min, root_eps, max_iter,
+                            t_root);
+                        if (rs == SolveStatus::Ok) {
+                            t_event = t_root;
+                        }
+                    }
+                    State2 s_event;
+                    (void)propagate_by(mu, req.initial_state, t_event - req.start_time,
+                                       s_event);
+                    PredictedEvent ev;
+                    ev.type = EventType::SoiEntry;
+                    ev.time = t_event;
+                    ev.from_body = req.central_body;
+                    ev.to_body = child_id;
+                    ev.state = s_event;
+                    consider(ev);
+                }
             }
             f_child_lo[ci] = f_ch_hi;
         }

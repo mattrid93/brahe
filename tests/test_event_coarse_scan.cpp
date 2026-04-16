@@ -136,6 +136,27 @@ TEST_CASE("CoarseScan_FindsGrazingCandidateWithoutSignChange", "[phase3][scan]")
     REQUIRE(event.to_body == 2);
 }
 
+TEST_CASE("CoarseScan_FindsChildEntryWhenCoarseEndpointsStayOutside", "[phase3][scan]") {
+    // This is the true no-sign-change grazing case: the spacecraft dips just inside the
+    // child SOI between coarse samples, but both coarse endpoints remain outside.
+    BodySystem sys =
+        build_root_with_stationary_child(1.0, 0.5, 1000.0, 2, 0.1, 5.0, 50.0);
+    EventDetector det(sys);
+
+    EventSearchRequest req;
+    req.central_body = 1;
+    req.start_time = 0.0;
+    req.initial_state = State2{{47.5, 4.999}, {100.0, 0.0}};
+    req.time_limit = 1.0;
+
+    PredictedEvent event;
+    REQUIRE(det.find_next_event(req, event) == SolveStatus::Ok);
+    REQUIRE(event.type == EventType::SoiEntry);
+    REQUIRE(event.to_body == 2);
+    REQUIRE(event.time > 0.0);
+    REQUIRE(event.time < 0.05);
+}
+
 TEST_CASE("CoarseScan_UsesAdaptiveStepSmallEnoughToNotSkipSmallChildSoi", "[phase3][scan]") {
     // Very small child SOI. Without adaptive stepping, a naive scan could skip it.
     BodySystem sys =
