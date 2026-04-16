@@ -149,14 +149,14 @@ SolveStatus TrajectoryBuilder::build_preview(const PreviewRequest& req,
                                               Trajectory& out_trajectory) const {
     out_trajectory.segments.clear();
 
-    // Bound-free input path: allocate a temporary buffer sized to max_segments
-    // and delegate to the shared append-into-buffer helper. This keeps the
-    // fixed and dynamic paths byte-identical for valid prefixes.
+    // Bound-free input path: write directly into the output vector's storage
+    // while still sharing the fixed-size append helper.
     if (req.max_segments == 0) return SolveStatus::InvalidInput;
-    std::vector<Segment> buf(req.max_segments);
+    out_trajectory.segments.resize(req.max_segments);
     size_t count = 0;
-    SolveStatus status = build_preview_into(req, buf.data(), req.max_segments, count);
-    out_trajectory.segments.assign(buf.begin(), buf.begin() + count);
+    SolveStatus status =
+        build_preview_into(req, out_trajectory.segments.data(), req.max_segments, count);
+    out_trajectory.segments.resize(count);
     return status;
 }
 

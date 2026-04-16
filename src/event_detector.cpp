@@ -14,6 +14,14 @@ namespace {
 
 constexpr size_t kMaxChildrenPerBody = 64;
 
+struct CachedChild {
+    BodyId id = InvalidBody;
+    double soi_radius = 0.0;
+    double orbit_radius = 0.0;
+    double angular_rate = 0.0;
+    double phase_at_epoch = 0.0;
+};
+
 bool is_finite_state(const State2& s) {
     return std::isfinite(s.r.x) && std::isfinite(s.r.y) &&
            std::isfinite(s.v.x) && std::isfinite(s.v.y);
@@ -38,6 +46,17 @@ SolveStatus propagate_by(double mu, const State2& initial, double dt, State2& ou
         return SolveStatus::Ok;
     }
     return TwoBody::propagate(mu, initial, dt, out);
+}
+
+Vec2 child_position(const CachedChild& child, double t) {
+    double theta = child.phase_at_epoch + child.angular_rate * t;
+    return {child.orbit_radius * std::cos(theta), child.orbit_radius * std::sin(theta)};
+}
+
+Vec2 child_velocity(const CachedChild& child, double t) {
+    double theta = child.phase_at_epoch + child.angular_rate * t;
+    double v_mag = child.orbit_radius * child.angular_rate;
+    return {v_mag * (-std::sin(theta)), v_mag * std::cos(theta)};
 }
 
 }  // namespace
@@ -91,12 +110,17 @@ SolveStatus EventDetector::find_next_event(const EventSearchRequest& req,
         return SolveStatus::InvalidInput;
     }
 
-    // --- Step 2: set default output to TimeLimit at horizon end with propagated state ---
-    // Propagator may fail for degenerate inputs (e.g. purely radial trajectories).
-    // In that case we still return a valid TimeLimit event using the initial state
-    // as the fallback -- the detector contract forbids NaN output on valid requests.
-    bool propagation_ok = true;
-    {
+    CachedChild children[kMaxChildrenPerBody];
+    size_t child_count = 0;
+    for (const BodyId* p = child_begin; p != child_end; ++p) {
+        const BodyDef* ch = bodies_.get_body(*p);
+        if (ch == nullptr) continue;
+        children[child_count++] =
+            CachedChild{ch->id, ch->soi_radius, ch->orbit_radius,
+                        ch->angular_rate, ch->phase_at_epoch};
+    }
+
+    auto set_time_limit_output = [&]() {
         State2 at_end;
         SolveStatus ps = propagate_by(mu, req.initial_state, horizon, at_end);
         out.type = EventType::TimeLimit;
@@ -105,11 +129,10 @@ SolveStatus EventDetector::find_next_event(const EventSearchRequest& req,
         out.to_body = InvalidBody;
         if (ps != SolveStatus::Ok || !is_finite_state(at_end)) {
             out.state = req.initial_state;
-            propagation_ok = false;
         } else {
             out.state = at_end;
         }
-    }
+    };
 
     // --- Step 3: candidate arbitration ---
     PredictedEvent best{};
@@ -124,10 +147,10 @@ SolveStatus EventDetector::find_next_event(const EventSearchRequest& req,
     // Root evaluation helpers. These operate on a pre-propagated spacecraft state.
     auto eval_impact = [&](const State2& s) { return length(s.r) - body_radius; };
     auto eval_exit = [&](const State2& s) { return length(s.r) - soi_radius; };
-    auto eval_child = [&](const State2& s, BodyId child_id, double abs_t) {
-        const BodyDef* ch = bodies_.get_body(child_id);
-        Vec2 rc = bodies_.position_in_parent(child_id, abs_t);
-        return length(s.r - rc) - ch->soi_radius;
+    auto eval_child = [&](const State2& s, size_t child_index, double abs_t) {
+        const CachedChild& child = children[child_index];
+        Vec2 rc = child_position(child, abs_t);
+        return length(s.r - rc) - child.soi_radius;
     };
 
     // --- Step 4: start-state / boundary policy (spec 6.3) ---
@@ -164,15 +187,14 @@ SolveStatus EventDetector::find_next_event(const EventSearchRequest& req,
     }
 
     // Child SOI entry at start: fire only if inside by > root_eps OR on boundary with inward trend.
-    for (const BodyId* p = child_begin; p != child_end; ++p) {
-        const BodyDef* ch = bodies_.get_body(*p);
-        if (ch == nullptr) continue;
-        Vec2 r_child = bodies_.position_in_parent(*p, req.start_time);
-        Vec2 v_child = bodies_.velocity_in_parent(*p, req.start_time);
+    for (size_t i = 0; i < child_count; ++i) {
+        const CachedChild& child = children[i];
+        Vec2 r_child = child_position(child, req.start_time);
+        Vec2 v_child = child_velocity(child, req.start_time);
         Vec2 d = req.initial_state.r - r_child;
         Vec2 v_rel = req.initial_state.v - v_child;
         double dist = length(d);
-        double f = dist - ch->soi_radius;
+        double f = dist - child.soi_radius;
         double d_dot_v = dot(d, v_rel);  // sign of d/dt(dist^2)/2 = sign of d/dt(dist)
         bool inside = f < -root_eps;
         bool on_boundary_inward = std::abs(f) <= root_eps && d_dot_v < 0.0;
@@ -181,7 +203,7 @@ SolveStatus EventDetector::find_next_event(const EventSearchRequest& req,
             ev.type = EventType::SoiEntry;
             ev.time = req.start_time;
             ev.from_body = req.central_body;
-            ev.to_body = *p;
+            ev.to_body = child.id;
             ev.state = req.initial_state;
             consider(ev);
         }
@@ -190,6 +212,7 @@ SolveStatus EventDetector::find_next_event(const EventSearchRequest& req,
     // Degenerate horizon: skip scan entirely.
     if (horizon <= time_eps) {
         if (have_best) out = best;
+        else set_time_limit_output();
         return SolveStatus::Ok;
     }
 
@@ -198,12 +221,11 @@ SolveStatus EventDetector::find_next_event(const EventSearchRequest& req,
     double v_sc = length(req.initial_state.v);
     double v_rel_max = v_sc;
     double min_child_soi = std::numeric_limits<double>::infinity();
-    for (const BodyId* p = child_begin; p != child_end; ++p) {
-        const BodyDef* ch = bodies_.get_body(*p);
-        if (ch == nullptr) continue;
-        double v_moon = std::abs(ch->orbit_radius * ch->angular_rate);
+    for (size_t i = 0; i < child_count; ++i) {
+        const CachedChild& child = children[i];
+        double v_moon = std::abs(child.orbit_radius * child.angular_rate);
         v_rel_max = std::max(v_rel_max, v_sc + v_moon);
-        min_child_soi = std::min(min_child_soi, ch->soi_radius);
+        min_child_soi = std::min(min_child_soi, child.soi_radius);
     }
     const double v_floor = 0.1;
     double dt_child = std::isfinite(min_child_soi)
@@ -221,21 +243,13 @@ SolveStatus EventDetector::find_next_event(const EventSearchRequest& req,
     double f_imp_lo = eval_impact(s_lo);
     double f_exit_lo = eval_exit(s_lo);
     double f_child_lo[kMaxChildrenPerBody];
-    {
-        size_t i = 0;
-        for (const BodyId* p = child_begin; p != child_end; ++p, ++i) {
-            f_child_lo[i] = eval_child(s_lo, *p, t_lo);
-        }
+    for (size_t i = 0; i < child_count; ++i) {
+        f_child_lo[i] = eval_child(s_lo, i, t_lo);
     }
 
     // Hard cap on scan iterations prevents infinite loops from pathological inputs.
     const int max_scan_steps = 200000;
     int scan_steps = 0;
-
-    // Note: horizon propagation may have failed (e.g. radial trajectory that
-    // reaches the central singularity). The scan can still succeed for earlier
-    // t values, and the mid-scan failure handler below will then kick in.
-    (void)propagation_ok;
 
     while (t_lo < req.time_limit && scan_steps < max_scan_steps) {
         ++scan_steps;
@@ -290,6 +304,7 @@ SolveStatus EventDetector::find_next_event(const EventSearchRequest& req,
                 consider(ev);
             }
             if (have_best) out = best;
+            else set_time_limit_output();
             return SolveStatus::Ok;
         }
 
@@ -446,15 +461,14 @@ SolveStatus EventDetector::find_next_event(const EventSearchRequest& req,
         }
 
         // --- Child entry brackets ---
-        size_t ci = 0;
-        for (const BodyId* p = child_begin; p != child_end; ++p, ++ci) {
-            BodyId child_id = *p;
+        for (size_t ci = 0; ci < child_count; ++ci) {
+            const CachedChild& child = children[ci];
             double f_ch_lo = f_child_lo[ci];
-            double f_ch_hi = eval_child(s_hi, child_id, t_hi);
-            auto f_of_t = [&, child_id](double t) {
+            double f_ch_hi = eval_child(s_hi, ci, t_hi);
+            auto f_of_t = [&, ci](double t) {
                 State2 s;
                 (void)propagate_by(mu, req.initial_state, t - req.start_time, s);
-                return eval_child(s, child_id, t);
+                return eval_child(s, ci, t);
             };
             if (f_ch_lo > 0.0 && f_ch_hi <= 0.0) {
                 double t_root = t_lo;
@@ -469,16 +483,15 @@ SolveStatus EventDetector::find_next_event(const EventSearchRequest& req,
                 ev.type = EventType::SoiEntry;
                 ev.time = t_root;
                 ev.from_body = req.central_body;
-                ev.to_body = child_id;
+                ev.to_body = child.id;
                 ev.state = s_root;
                 consider(ev);
             } else if (f_ch_lo > 0.0 && f_ch_hi > 0.0) {
-                const BodyDef* ch = bodies_.get_body(child_id);
                 double t_mid = 0.5 * (t_lo + t_hi);
                 double f_mid = f_of_t(t_mid);
-                double child_soi = (ch != nullptr) ? ch->soi_radius : 0.0;
                 double proximity =
-                    std::max({root_eps * 10.0, child_soi * 0.05, 0.5 * v_rel_max * dt_scan});
+                    std::max({root_eps * 10.0, child.soi_radius * 0.05,
+                              0.5 * v_rel_max * dt_scan});
                 bool possible_minimum = f_mid <= f_ch_lo && f_mid <= f_ch_hi;
                 bool near_boundary = f_mid <= proximity;
                 if (!(possible_minimum && near_boundary)) {
@@ -513,7 +526,7 @@ SolveStatus EventDetector::find_next_event(const EventSearchRequest& req,
                     ev.type = EventType::SoiEntry;
                     ev.time = t_event;
                     ev.from_body = req.central_body;
-                    ev.to_body = child_id;
+                    ev.to_body = child.id;
                     ev.state = s_event;
                     consider(ev);
                 }
@@ -537,8 +550,9 @@ SolveStatus EventDetector::find_next_event(const EventSearchRequest& req,
 
     if (have_best) {
         out = best;
+    } else {
+        set_time_limit_output();
     }
-    // Otherwise out stays as TimeLimit at horizon end (set in Step 2).
     return SolveStatus::Ok;
 }
 
