@@ -17,6 +17,7 @@ add_executable(brahe_tests
     test_conic_roundtrip.cpp
     test_anomaly_conversions.cpp
     test_two_body_propagation.cpp
+    test_two_body_radial.cpp
     test_invalid_input.cpp
     test_event_api.cpp
     test_event_root_functions.cpp
@@ -25,6 +26,7 @@ add_executable(brahe_tests
     test_event_detector_impact.cpp
     test_event_detector_soi_exit.cpp
     test_event_detector_child_entry.cpp
+    test_event_detector_radial.cpp
     test_event_ordering.cpp
     test_event_boundaries.cpp
     test_event_invalid_input.cpp
