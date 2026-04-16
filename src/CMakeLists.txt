@@ -1,4 +1,4 @@
-add_library(brahe_lib body_system.cpp two_body.cpp)
+add_library(brahe_lib body_system.cpp two_body.cpp event_detector.cpp)
 target_include_directories(brahe_lib PUBLIC ${PROJECT_SOURCE_DIR}/include)
 target_compile_features(brahe_lib PUBLIC cxx_std_17)
 target_compile_options(brahe_lib PRIVATE -Wall -Wextra -Wpedantic)

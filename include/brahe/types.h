@@ -36,6 +36,7 @@ struct Tolerances {
     double root_epsilon = 1e-6;
     double lambert_residual_epsilon = 1e-10;
     double parabolic_eccentricity_band = 1e-6;
+    int max_event_refine_iterations = 32;
 };
 
 struct BodyDef {
