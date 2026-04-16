@@ -65,19 +65,29 @@ template <typename F>
 SolveStatus refine_root_bisection(F&& eval, double t_lo, double t_hi, double f_lo, double f_hi,
                                   double tol, int max_iterations, double& out_t) {
     if (max_iterations <= 0) {
-        out_t = (f_lo == 0.0) ? t_lo : t_hi;
+        out_t = 0.5 * (t_lo + t_hi);
+        return SolveStatus::NoConvergence;
+    }
+    if (t_lo >= t_hi) {
+        out_t = 0.5 * (t_lo + t_hi);
         return SolveStatus::NoConvergence;
     }
 
-    // Ensure f_lo <= 0 and f_hi >= 0 for canonical ordering
-    if (f_lo > 0.0) {
-        double tmp;
-        tmp = t_lo;
-        t_lo = t_hi;
-        t_hi = tmp;
-        tmp = f_lo;
-        f_lo = f_hi;
-        f_hi = tmp;
+    // Determine the sign convention at the two endpoints so we can narrow the
+    // bracket correctly without swapping t_lo / t_hi (which would break the
+    // t_lo < t_hi invariant that the convergence check depends on).
+    //
+    // polarity = +1 when f_lo <= 0 <= f_hi (f increasing through the root)
+    // polarity = -1 when f_lo >= 0 >= f_hi (f decreasing through the root)
+    double polarity;
+    if (f_lo <= 0.0 && f_hi >= 0.0) {
+        polarity = 1.0;
+    } else if (f_lo >= 0.0 && f_hi <= 0.0) {
+        polarity = -1.0;
+    } else {
+        // Endpoints do not bracket a sign change.
+        out_t = 0.5 * (t_lo + t_hi);
+        return SolveStatus::NoConvergence;
     }
 
     for (int i = 0; i < max_iterations; ++i) {
@@ -87,7 +97,11 @@ SolveStatus refine_root_bisection(F&& eval, double t_lo, double t_hi, double f_l
             return SolveStatus::Ok;
         }
         double f_mid = eval(t_mid);
-        if (f_mid <= 0.0) {
+        // Keep t_lo as the "low-polarity-signed" end. When polarity == +1 that
+        // means f_lo is on the negative side; when polarity == -1 it means f_lo
+        // is on the positive side. Either way, the root is in [t_mid, t_hi]
+        // iff polarity * f_mid <= 0.
+        if (polarity * f_mid <= 0.0) {
             t_lo = t_mid;
             f_lo = f_mid;
         } else {
