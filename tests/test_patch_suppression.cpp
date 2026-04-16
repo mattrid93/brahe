@@ -154,7 +154,7 @@ TEST_CASE("Suppression_BlocksOnlyTheCrossedBoundary", "[phase4][suppression]") {
     Tolerances tol{};
 
     Trajectory chain;
-    REQUIRE(build_chain(sys, tol, kSun, 0.0, State2{{47.0, 0.01}, {5.0, 0.0}}, 20.0, 16,
+    REQUIRE(build_chain(sys, tol, kSun, 0.0, State2{{47.0, 0.5}, {5.0, 0.0}}, 20.0, 16,
                         chain) == SolveStatus::Ok);
 
     // Expected sequence: SoiEntry(A), SoiExit(A), SoiEntry(B), SoiExit(B), ...
@@ -248,7 +248,7 @@ TEST_CASE("Suppression_DoesNotBlockUnrelatedSiblingChildEntry", "[phase4][suppre
     Tolerances tol{};
 
     Trajectory chain;
-    REQUIRE(build_chain(sys, tol, kSun, 0.0, State2{{47.0, 0.01}, {5.0, 0.0}}, 20.0, 16,
+    REQUIRE(build_chain(sys, tol, kSun, 0.0, State2{{47.0, 0.5}, {5.0, 0.0}}, 20.0, 16,
                         chain) == SolveStatus::Ok);
 
     // Must find a Moon B segment (only possible if entry wasn't suppressed).

@@ -55,7 +55,7 @@ TEST_CASE("PatchBoundary_PositionContinuityWithinPositionEpsilon",
     EventSearchRequest req;
     req.central_body = 1;
     req.start_time = 0.0;
-    req.initial_state = State2{{30.0, 4.5}, {5.0, 0.0}};
+    req.initial_state = State2{{30.0, 4.5}, {4.0, 4.0}};
     req.time_limit = 20.0;
 
     PredictedEvent ev{};
@@ -86,7 +86,7 @@ TEST_CASE("PatchBoundary_VelocityContinuityWithinVelocityEpsilon",
     EventSearchRequest req;
     req.central_body = 1;
     req.start_time = 0.0;
-    req.initial_state = State2{{30.0, 4.5}, {5.0, 0.0}};
+    req.initial_state = State2{{30.0, 4.5}, {4.0, 4.0}};
     req.time_limit = 20.0;
 
     PredictedEvent ev{};

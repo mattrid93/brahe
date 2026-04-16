@@ -218,7 +218,7 @@ TEST_CASE("PreviewChain_NoNaNsInAnySegmentEndpoints", "[phase4][property][chain]
 }
 
 TEST_CASE("DynamicAndFixedPreviewAgreeUpToCapacity", "[phase4][property][chain]") {
-    BodySystem sys = sun_with_moon();
+    BodySystem sys = sun_with_moon(0.0, 0.0);
     TrajectoryBuilder tb(sys);
 
     PreviewRequest req;
