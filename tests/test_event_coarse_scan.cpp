@@ -196,3 +196,83 @@ TEST_CASE("CoarseScan_RespectsMinimumStepFloor", "[phase3][scan]") {
     REQUIRE(s == SolveStatus::Ok);  // completes without hanging
     REQUIRE(std::isfinite(event.time));
 }
+
+TEST_CASE("CoarseScan_DiagnosticsCountScanAndRefinementWork", "[phase3][scan][diagnostics]") {
+    BodySystem sys = build_root_only(1.0, 0.5, 1000.0);
+    EventDetectorDiagnostics diagnostics{};
+    EventDetector det(sys, Tolerances{}, &diagnostics);
+
+    EventSearchRequest req;
+    req.central_body = 1;
+    req.start_time = 0.0;
+    req.initial_state = State2{{10.0, 0.0}, {0.0, std::sqrt(1.0 / 10.0)}};
+    req.time_limit = 20.0;
+
+    PredictedEvent event;
+    REQUIRE(det.find_next_event(req, event) == SolveStatus::Ok);
+    REQUIRE(event.type == EventType::TimeLimit);
+    REQUIRE(diagnostics.scan_steps > 0);
+}
+
+TEST_CASE("CoarseScan_DoesNotRunMinimumRefinementForStrictNonCandidateWindows",
+          "[phase3][scan][diagnostics]") {
+    BodySystem sys = build_root_only(1.0, 0.5, 1000.0);
+    EventDetectorDiagnostics diagnostics{};
+    EventDetector det(sys, Tolerances{}, &diagnostics);
+
+    EventSearchRequest req;
+    req.central_body = 1;
+    req.start_time = 0.0;
+    // Circular orbit far from both the body radius and SOI boundary.
+    req.initial_state = State2{{10.0, 0.0}, {0.0, std::sqrt(1.0 / 10.0)}};
+    req.time_limit = 20.0;
+
+    PredictedEvent event;
+    REQUIRE(det.find_next_event(req, event) == SolveStatus::Ok);
+    REQUIRE(event.type == EventType::TimeLimit);
+    REQUIRE(diagnostics.scan_steps > 10);
+    REQUIRE(diagnostics.impact_minimum_refinements == 0);
+    REQUIRE(diagnostics.soi_exit_minimum_refinements == 0);
+    REQUIRE(diagnostics.child_entry_minimum_refinements == 0);
+}
+
+TEST_CASE("CoarseScan_DiagnosticsRecordGrazingImpactMinimumRefinement",
+          "[phase3][scan][diagnostics]") {
+    BodySystem sys = build_root_only(1.0, 0.1, 1e6);
+    EventDetectorDiagnostics diagnostics{};
+    EventDetector det(sys, Tolerances{}, &diagnostics);
+
+    EventSearchRequest req;
+    req.central_body = 1;
+    req.start_time = 0.0;
+    req.initial_state = State2{{35.0, 0.01}, {-3.0, 0.0}};
+    req.time_limit = 50.0;
+
+    PredictedEvent event;
+    REQUIRE(det.find_next_event(req, event) == SolveStatus::Ok);
+    REQUIRE(event.type == EventType::Impact);
+    REQUIRE(diagnostics.scan_steps > 10);
+    REQUIRE(diagnostics.impact_minimum_refinements > 0);
+    REQUIRE(diagnostics.impact_minimum_refinements <= 2);
+}
+
+TEST_CASE("CoarseScan_DiagnosticsRecordGrazingChildEntryMinimumRefinement",
+          "[phase3][scan][diagnostics]") {
+    BodySystem sys =
+        build_root_with_stationary_child(1.0, 0.5, 1000.0, 2, 0.1, 5.0, 50.0);
+    EventDetectorDiagnostics diagnostics{};
+    EventDetector det(sys, Tolerances{}, &diagnostics);
+
+    EventSearchRequest req;
+    req.central_body = 1;
+    req.start_time = 0.0;
+    req.initial_state = State2{{-11.0, 4.999}, {20.0, 0.0}};
+    req.time_limit = 10.0;
+
+    PredictedEvent event;
+    REQUIRE(det.find_next_event(req, event) == SolveStatus::Ok);
+    REQUIRE(event.type == EventType::SoiEntry);
+    REQUIRE(diagnostics.scan_steps > 10);
+    REQUIRE(diagnostics.child_entry_minimum_refinements > 0);
+    REQUIRE(diagnostics.child_entry_minimum_refinements <= 2);
+}

@@ -42,8 +42,9 @@ SolveStatus propagate_by(double mu, const State2& initial, double dt, State2& ou
 
 }  // namespace
 
-EventDetector::EventDetector(const BodySystem& bodies, const Tolerances& tolerances)
-    : bodies_(bodies), tolerances_(tolerances) {}
+EventDetector::EventDetector(const BodySystem& bodies, const Tolerances& tolerances,
+                             EventDetectorDiagnostics* diagnostics)
+    : bodies_(bodies), tolerances_(tolerances), diagnostics_(diagnostics) {}
 
 SolveStatus EventDetector::find_next_event(const EventSearchRequest& req,
                                            PredictedEvent& out) const {
@@ -238,6 +239,7 @@ SolveStatus EventDetector::find_next_event(const EventSearchRequest& req,
 
     while (t_lo < req.time_limit && scan_steps < max_scan_steps) {
         ++scan_steps;
+        if (diagnostics_ != nullptr) ++diagnostics_->scan_steps;
         double t_hi = std::min(t_lo + dt_scan, req.time_limit);
         State2 s_hi;
         SolveStatus ps = propagate_by(mu, req.initial_state, t_hi - req.start_time, s_hi);
@@ -270,6 +272,7 @@ SolveStatus EventDetector::find_next_event(const EventSearchRequest& req,
                     return eval_impact(s);
                 };
                 double t_root = t_lo;
+                if (diagnostics_ != nullptr) ++diagnostics_->root_refinements;
                 SolveStatus rs = detail::refine_root_bisection(
                     f_of_t, t_lo, t_valid_lo, f_imp_lo, f_imp_end, root_eps, max_iter,
                     t_root);
@@ -299,6 +302,7 @@ SolveStatus EventDetector::find_next_event(const EventSearchRequest& req,
         };
         if (f_imp_lo > 0.0 && f_imp_hi <= 0.0) {
             double t_root = t_lo;
+            if (diagnostics_ != nullptr) ++diagnostics_->root_refinements;
             SolveStatus rs = detail::refine_root_bisection(
                 f_impact_of_t, t_lo, t_hi, f_imp_lo, f_imp_hi, root_eps, max_iter,
                 t_root);
@@ -314,8 +318,19 @@ SolveStatus EventDetector::find_next_event(const EventSearchRequest& req,
             ev.state = s_root;
             consider(ev);
         } else if (f_imp_lo > 0.0 && f_imp_hi > 0.0) {
+            double t_mid = 0.5 * (t_lo + t_hi);
+            double f_mid = f_impact_of_t(t_mid);
+            double proximity =
+                std::max({root_eps * 10.0, body_radius, 0.5 * v_sc * dt_scan});
+            bool possible_minimum = f_mid <= f_imp_lo && f_mid <= f_imp_hi;
+            bool near_boundary = f_mid <= proximity;
+            if (!(possible_minimum && near_boundary)) {
+                // Same-sign windows are common. Only refine when the coarse
+                // midpoint suggests a local minimum near the boundary.
+            } else {
             double t_min = t_lo;
             double f_min = f_imp_lo;
+            if (diagnostics_ != nullptr) ++diagnostics_->impact_minimum_refinements;
             SolveStatus ms = detail::refine_minimum(
                 f_impact_of_t, t_lo, t_hi, root_eps, max_iter, t_min, f_min);
             if (ms != SolveStatus::Ok && f_min > root_eps) {
@@ -332,6 +347,7 @@ SolveStatus EventDetector::find_next_event(const EventSearchRequest& req,
                 double t_event = t_min;
                 if (f_min <= 0.0 && t_min > t_lo + time_eps) {
                     double t_root = t_lo;
+                    if (diagnostics_ != nullptr) ++diagnostics_->root_refinements;
                     SolveStatus rs = detail::refine_root_bisection(
                         f_impact_of_t, t_lo, t_min, f_imp_lo, f_min, root_eps, max_iter,
                         t_root);
@@ -350,6 +366,7 @@ SolveStatus EventDetector::find_next_event(const EventSearchRequest& req,
                 ev.state = s_event;
                 consider(ev);
             }
+            }
         }
 
         // --- SOI exit bracket ---
@@ -361,6 +378,7 @@ SolveStatus EventDetector::find_next_event(const EventSearchRequest& req,
         };
         if (f_exit_lo < 0.0 && f_exit_hi >= 0.0) {
             double t_root = t_lo;
+            if (diagnostics_ != nullptr) ++diagnostics_->root_refinements;
             SolveStatus rs = detail::refine_root_bisection(
                 f_exit_of_t, t_lo, t_hi, f_exit_lo, f_exit_hi, root_eps, max_iter,
                 t_root);
@@ -376,9 +394,19 @@ SolveStatus EventDetector::find_next_event(const EventSearchRequest& req,
             ev.state = s_root;
             consider(ev);
         } else if (f_exit_lo < 0.0 && f_exit_hi < 0.0) {
+            double t_mid = 0.5 * (t_lo + t_hi);
+            double f_mid = f_exit_of_t(t_mid);
+            double proximity = std::max(root_eps * 10.0, soi_radius * 0.05);
+            bool possible_maximum = f_mid >= f_exit_lo && f_mid >= f_exit_hi;
+            bool near_boundary = f_mid >= -proximity;
+            if (!(possible_maximum && near_boundary)) {
+                // Same-sign windows are common. Only refine when the coarse
+                // midpoint suggests a local maximum near the SOI boundary.
+            } else {
             auto neg_exit_of_t = [&](double t) { return -f_exit_of_t(t); };
             double t_max = t_lo;
             double neg_f_max = -f_exit_lo;
+            if (diagnostics_ != nullptr) ++diagnostics_->soi_exit_minimum_refinements;
             SolveStatus ms = detail::refine_minimum(
                 neg_exit_of_t, t_lo, t_hi, root_eps, max_iter, t_max, neg_f_max);
 
@@ -395,6 +423,7 @@ SolveStatus EventDetector::find_next_event(const EventSearchRequest& req,
                 double t_event = t_max;
                 if (f_max >= 0.0 && t_max > t_lo + time_eps) {
                     double t_root = t_lo;
+                    if (diagnostics_ != nullptr) ++diagnostics_->root_refinements;
                     SolveStatus rs = detail::refine_root_bisection(
                         f_exit_of_t, t_lo, t_max, f_exit_lo, f_max, root_eps, max_iter,
                         t_root);
@@ -413,6 +442,7 @@ SolveStatus EventDetector::find_next_event(const EventSearchRequest& req,
                 ev.state = s_event;
                 consider(ev);
             }
+            }
         }
 
         // --- Child entry brackets ---
@@ -428,6 +458,7 @@ SolveStatus EventDetector::find_next_event(const EventSearchRequest& req,
             };
             if (f_ch_lo > 0.0 && f_ch_hi <= 0.0) {
                 double t_root = t_lo;
+                if (diagnostics_ != nullptr) ++diagnostics_->root_refinements;
                 SolveStatus rs = detail::refine_root_bisection(
                     f_of_t, t_lo, t_hi, f_ch_lo, f_ch_hi, root_eps, max_iter, t_root);
                 if (rs != SolveStatus::Ok) return rs;
@@ -442,8 +473,21 @@ SolveStatus EventDetector::find_next_event(const EventSearchRequest& req,
                 ev.state = s_root;
                 consider(ev);
             } else if (f_ch_lo > 0.0 && f_ch_hi > 0.0) {
+                const BodyDef* ch = bodies_.get_body(child_id);
+                double t_mid = 0.5 * (t_lo + t_hi);
+                double f_mid = f_of_t(t_mid);
+                double child_soi = (ch != nullptr) ? ch->soi_radius : 0.0;
+                double proximity =
+                    std::max({root_eps * 10.0, child_soi * 0.05, 0.5 * v_rel_max * dt_scan});
+                bool possible_minimum = f_mid <= f_ch_lo && f_mid <= f_ch_hi;
+                bool near_boundary = f_mid <= proximity;
+                if (!(possible_minimum && near_boundary)) {
+                    // Same-sign windows are common. Only refine when the coarse
+                    // midpoint suggests a local minimum near the child SOI.
+                } else {
                 double t_min = t_lo;
                 double f_min = f_ch_lo;
+                if (diagnostics_ != nullptr) ++diagnostics_->child_entry_minimum_refinements;
                 SolveStatus ms = detail::refine_minimum(
                     f_of_t, t_lo, t_hi, root_eps, max_iter, t_min, f_min);
                 if (ms != SolveStatus::Ok) return ms;
@@ -452,6 +496,7 @@ SolveStatus EventDetector::find_next_event(const EventSearchRequest& req,
                     double t_event = t_min;
                     if (f_min <= 0.0 && t_min > t_lo + time_eps) {
                         double t_root = t_lo;
+                        if (diagnostics_ != nullptr) ++diagnostics_->root_refinements;
                         SolveStatus rs = detail::refine_root_bisection(
                             f_of_t, t_lo, t_min, f_ch_lo, f_min, root_eps, max_iter,
                             t_root);
@@ -471,6 +516,7 @@ SolveStatus EventDetector::find_next_event(const EventSearchRequest& req,
                     ev.to_body = child_id;
                     ev.state = s_event;
                     consider(ev);
+                }
                 }
             }
             f_child_lo[ci] = f_ch_hi;

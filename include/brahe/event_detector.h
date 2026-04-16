@@ -23,11 +23,20 @@ struct EventSearchRequest {
     double time_limit = 0.0;
 };
 
+struct EventDetectorDiagnostics {
+    int scan_steps = 0;
+    int root_refinements = 0;
+    int impact_minimum_refinements = 0;
+    int soi_exit_minimum_refinements = 0;
+    int child_entry_minimum_refinements = 0;
+};
+
 // --- Public detector API ---
 
 class EventDetector {
 public:
-    EventDetector(const BodySystem& bodies, const Tolerances& tolerances = {});
+    EventDetector(const BodySystem& bodies, const Tolerances& tolerances = {},
+                  EventDetectorDiagnostics* diagnostics = nullptr);
 
     SolveStatus find_next_event(const EventSearchRequest& req,
                                 PredictedEvent& out_event) const;
@@ -35,6 +44,7 @@ public:
 private:
     const BodySystem& bodies_;
     Tolerances tolerances_;
+    EventDetectorDiagnostics* diagnostics_ = nullptr;
 };
 
 // --- Internal helpers exposed for testing ---
