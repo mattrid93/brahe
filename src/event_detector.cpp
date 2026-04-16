@@ -231,13 +231,10 @@ SolveStatus EventDetector::find_next_event(const EventSearchRequest& req,
     const int max_scan_steps = 200000;
     int scan_steps = 0;
 
-    // If we could not propagate to the horizon in Step 2, the propagator will also
-    // fail for every intermediate t in the scan. Skip the scan entirely and keep
-    // whatever was detected by the start-state checks (or the TimeLimit fallback).
-    if (!propagation_ok) {
-        if (have_best) out = best;
-        return SolveStatus::Ok;
-    }
+    // Note: horizon propagation may have failed (e.g. radial trajectory that
+    // reaches the central singularity). The scan can still succeed for earlier
+    // t values, and the mid-scan failure handler below will then kick in.
+    (void)propagation_ok;
 
     while (t_lo < req.time_limit && scan_steps < max_scan_steps) {
         ++scan_steps;
@@ -245,8 +242,50 @@ SolveStatus EventDetector::find_next_event(const EventSearchRequest& req,
         State2 s_hi;
         SolveStatus ps = propagate_by(mu, req.initial_state, t_hi - req.start_time, s_hi);
         if (ps != SolveStatus::Ok || !is_finite_state(s_hi)) {
-            // Propagator failed mid-scan. Fall back to best-so-far or the TimeLimit
-            // default. Output remains finite; status stays Ok.
+            // Propagator failed mid-scan. The only failure mode after validation is
+            // the radial singularity at r=0 -- the spacecraft falls into the central
+            // body during (t_lo, t_hi]. Binary-search for the last propagable time
+            // and, if an impact bracket exists there, refine it.
+            double t_valid_lo = t_lo;   // propagation works here
+            double t_valid_hi = t_hi;   // propagation fails here
+            State2 s_last = s_lo;
+            for (int k = 0; k < 64; ++k) {
+                if (t_valid_hi - t_valid_lo <= time_eps) break;
+                double t_m = 0.5 * (t_valid_lo + t_valid_hi);
+                State2 s_m;
+                SolveStatus ms =
+                    propagate_by(mu, req.initial_state, t_m - req.start_time, s_m);
+                if (ms == SolveStatus::Ok && is_finite_state(s_m)) {
+                    t_valid_lo = t_m;
+                    s_last = s_m;
+                } else {
+                    t_valid_hi = t_m;
+                }
+            }
+            double f_imp_end = eval_impact(s_last);
+            if (f_imp_lo > 0.0 && f_imp_end <= 0.0) {
+                auto f_of_t = [&](double t) {
+                    State2 s;
+                    (void)propagate_by(mu, req.initial_state, t - req.start_time, s);
+                    return eval_impact(s);
+                };
+                double t_root = t_lo;
+                SolveStatus rs = detail::refine_root_bisection(
+                    f_of_t, t_lo, t_valid_lo, f_imp_lo, f_imp_end, root_eps, max_iter,
+                    t_root);
+                if (rs == SolveStatus::Ok) {
+                    State2 s_root;
+                    (void)propagate_by(mu, req.initial_state, t_root - req.start_time,
+                                       s_root);
+                    PredictedEvent ev;
+                    ev.type = EventType::Impact;
+                    ev.time = t_root;
+                    ev.from_body = req.central_body;
+                    ev.to_body = InvalidBody;
+                    ev.state = s_root;
+                    consider(ev);
+                }
+            }
             if (have_best) out = best;
             return SolveStatus::Ok;
         }

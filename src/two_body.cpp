@@ -122,6 +122,147 @@ SolveStatus mean_to_hyperbolic_anomaly(double Mh, double e, double& out_H, int m
     return SolveStatus::NoConvergence;
 }
 
+// --- Radial (h = 0) Kepler solvers ---
+//
+// Purely radial trajectories degenerate the conic parameterization (p = 0)
+// and must be propagated directly from the 1-D radial Kepler problem.
+// Parametric forms used below:
+//   Bound  (eps < 0): r = a*(1 - cos(u)),  t - t_peri = sqrt(a^3/mu)*(u - sin(u)), a = -mu/(2 eps) > 0
+//   Hyper  (eps > 0): r = a*(cosh(F) - 1), t - t_peri = sqrt(a^3/mu)*(sinh(F) - F), a =  mu/(2 eps) > 0
+//   Parab  (eps = 0): r^{3/2} = r_0^{3/2} + sign(v_r) * (3/2) sqrt(2 mu) * dt
+// In the bound and hyperbolic forms the point r = 0 is the central-body singularity;
+// propagation that would cross it fails with NumericalFailure.
+
+SolveStatus solve_radial_elliptic_kepler(double M_reduced, double& out_u,
+                                         int max_iterations = 100) {
+    // Solve u - sin(u) = M_reduced for u in [0, 2*pi), with M_reduced in [0, 2*pi).
+    double u;
+    if (M_reduced < 1e-3) {
+        u = std::cbrt(6.0 * M_reduced);                    // cube-root expansion near u=0
+    } else if (M_reduced > 2.0 * M_PI - 1e-3) {
+        u = 2.0 * M_PI - std::cbrt(6.0 * (2.0 * M_PI - M_reduced));
+    } else {
+        u = M_reduced + 0.5 * std::sin(M_reduced);
+    }
+    double tol = kKeplerTol * std::max(1.0, std::abs(M_reduced));
+    for (int i = 0; i < max_iterations; ++i) {
+        double f = u - std::sin(u) - M_reduced;
+        if (std::abs(f) < tol) {
+            out_u = u;
+            return SolveStatus::Ok;
+        }
+        double fp = 1.0 - std::cos(u);
+        if (fp < 1e-15) {
+            // Near u = 0 or 2*pi (central singularity); a small nudge in the
+            // direction of the residual keeps Newton off the flat spot.
+            u += (f < 0.0 ? 1e-3 : -1e-3);
+            continue;
+        }
+        double du = f / fp;
+        if (du > 0.5) du = 0.5;
+        if (du < -0.5) du = -0.5;
+        u -= du;
+        if (u < 0.0) u = 0.0;
+        if (u > 2.0 * M_PI) u = 2.0 * M_PI;
+    }
+    return SolveStatus::NoConvergence;
+}
+
+SolveStatus solve_radial_hyperbolic_kepler(double M, double& out_F,
+                                           int max_iterations = 100) {
+    // Solve sinh(F) - F = M for F.  sign(F) = sign(M).
+    double F;
+    if (std::abs(M) < 1.0) {
+        F = std::cbrt(6.0 * M);                            // small-M expansion
+    } else {
+        F = std::copysign(std::log(2.0 * std::abs(M) + 1.0), M);
+    }
+    double tol = kKeplerTol * std::max(1.0, std::abs(M));
+    for (int i = 0; i < max_iterations; ++i) {
+        double f = std::sinh(F) - F - M;
+        if (std::abs(f) < tol) {
+            out_F = F;
+            return SolveStatus::Ok;
+        }
+        double fp = std::cosh(F) - 1.0;
+        if (fp < 1e-15) {
+            F += (f < 0.0 ? 1e-3 : -1e-3);
+            continue;
+        }
+        F -= f / fp;
+    }
+    return SolveStatus::NoConvergence;
+}
+
+SolveStatus radial_propagate(double mu, const State2& initial, double dt,
+                             State2& out_state) {
+    double r_0 = length(initial.r);
+    Vec2 u_hat = {initial.r.x / r_0, initial.r.y / r_0};
+    double v_r_0 = initial.v.x * u_hat.x + initial.v.y * u_hat.y;   // signed radial speed
+    double eps = 0.5 * v_r_0 * v_r_0 - mu / r_0;
+    // Band width (parabolic) scaled by characteristic energy mu/r_0.
+    double eps_band = kTol.parabolic_eccentricity_band * (mu / r_0);
+
+    double r_new = 0.0;
+    double v_r_new = 0.0;
+
+    if (std::abs(eps) <= eps_band) {
+        // --- Parabolic radial ---
+        // r^{3/2} = r_0^{3/2} + sign(v_r_0) * 1.5 * sqrt(2 mu) * dt
+        double sign_v = (v_r_0 >= 0.0) ? 1.0 : -1.0;
+        double r_3_2 = std::pow(r_0, 1.5) + sign_v * 1.5 * std::sqrt(2.0 * mu) * dt;
+        if (r_3_2 <= 0.0) {
+            return SolveStatus::NumericalFailure;         // inbound crossed r=0
+        }
+        r_new = std::pow(r_3_2, 2.0 / 3.0);
+        v_r_new = sign_v * std::sqrt(2.0 * mu / r_new);
+    } else if (eps < 0.0) {
+        // --- Bound radial ---
+        double a = -mu / (2.0 * eps);                     // a > 0
+        double cos_E0 = std::clamp(1.0 - r_0 / a, -1.0, 1.0);
+        double E_0 = std::acos(cos_E0);                   // [0, pi]
+        if (v_r_0 < 0.0) E_0 = 2.0 * M_PI - E_0;           // inbound: E_0 in (pi, 2pi)
+        double M_0 = E_0 - std::sin(E_0);
+        double n = std::sqrt(mu / (a * a * a));
+        double M_new = M_0 + n * dt;
+        if (M_new < 0.0 || M_new >= 2.0 * M_PI) {
+            // Propagation would cross the r = 0 central-body singularity.
+            return SolveStatus::NumericalFailure;
+        }
+        double E_new;
+        SolveStatus ks = solve_radial_elliptic_kepler(M_new, E_new);
+        if (ks != SolveStatus::Ok) return ks;
+        double one_minus_cos = 1.0 - std::cos(E_new);
+        r_new = a * one_minus_cos;
+        if (one_minus_cos < 1e-30) return SolveStatus::NumericalFailure;
+        v_r_new = std::sqrt(mu / a) * std::sin(E_new) / one_minus_cos;
+    } else {
+        // --- Hyperbolic radial ---
+        double a = mu / (2.0 * eps);                      // a > 0
+        double cosh_F0 = 1.0 + r_0 / a;
+        double F_0 = std::acosh(std::max(1.0, cosh_F0));  // >= 0
+        if (v_r_0 < 0.0) F_0 = -F_0;
+        double M_0 = std::sinh(F_0) - F_0;
+        double n = std::sqrt(mu / (a * a * a));
+        double M_new = M_0 + n * dt;
+        if (F_0 < 0.0 && M_new >= 0.0) {
+            // Inbound trajectory reaches r = 0 within dt.
+            return SolveStatus::NumericalFailure;
+        }
+        double F_new;
+        SolveStatus ks = solve_radial_hyperbolic_kepler(M_new, F_new);
+        if (ks != SolveStatus::Ok) return ks;
+        double cosh_m1 = std::cosh(F_new) - 1.0;
+        if (cosh_m1 < 1e-30) return SolveStatus::NumericalFailure;
+        r_new = a * cosh_m1;
+        v_r_new = std::sqrt(mu / a) * std::sinh(F_new) / cosh_m1;
+    }
+
+    out_state.r = {r_new * u_hat.x, r_new * u_hat.y};
+    out_state.v = {v_r_new * u_hat.x, v_r_new * u_hat.y};
+    return SolveStatus::Ok;
+}
+
 } // namespace detail
 
 // ============================================================
@@ -355,6 +496,20 @@ SolveStatus TwoBody::propagate(double mu, const State2& initial, double dt,
     if (dt == 0.0) {
         out_state = initial;
         return SolveStatus::Ok;
+    }
+
+    // Radial (h = 0) dispatch.  The conic parameterization r = p / (1 + e cos nu)
+    // degenerates at p = 0, so we propagate the 1-D radial Kepler problem directly.
+    // Detection uses a relative tolerance scaled by the problem's characteristic
+    // value of |r x v| to avoid false positives on ordinary low-h orbits.
+    {
+        double r_mag = length(initial.r);
+        double v_mag = length(initial.v);
+        double h = specific_angular_momentum_z(initial);
+        double h_threshold = 1e-12 * std::max(1.0, r_mag * v_mag);
+        if (std::abs(h) <= h_threshold) {
+            return detail::radial_propagate(mu, initial, dt, out_state);
+        }
     }
 
     // Convert to elements
