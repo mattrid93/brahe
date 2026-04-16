@@ -20,6 +20,17 @@ bool is_finite(double value) {
     return std::isfinite(value);
 }
 
+double minimum_sibling_distance(const BodyDef& a, const BodyDef& b) {
+    if (a.angular_rate == b.angular_rate) {
+        double phase_delta = a.phase_at_epoch - b.phase_at_epoch;
+        double distance_sq = a.orbit_radius * a.orbit_radius +
+                             b.orbit_radius * b.orbit_radius -
+                             2.0 * a.orbit_radius * b.orbit_radius * std::cos(phase_delta);
+        return std::sqrt(std::max(0.0, distance_sq));
+    }
+    return std::abs(a.orbit_radius - b.orbit_radius);
+}
+
 } // namespace
 
 // --- BodySystemBuilder ---
@@ -104,6 +115,23 @@ SolveStatus BodySystemBuilder::build(BodySystem& out) const {
         }
         if (def.soi_radius >= def.orbit_radius) {
             return SolveStatus::InvalidInput;
+        }
+    }
+
+    for (size_t i = 0; i < n; ++i) {
+        if (i == root_idx) continue;
+        for (size_t j = i + 1; j < n; ++j) {
+            if (j == root_idx || parent_indices[i] != parent_indices[j]) continue;
+
+            const auto& a = sorted[i];
+            const auto& b = sorted[j];
+            double min_distance = minimum_sibling_distance(a, b);
+            if (min_distance <= a.soi_radius + b.soi_radius) {
+                return SolveStatus::InvalidInput;
+            }
+            if (min_distance <= a.radius + b.radius) {
+                return SolveStatus::InvalidInput;
+            }
         }
     }
 

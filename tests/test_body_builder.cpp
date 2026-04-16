@@ -332,6 +332,55 @@ TEST_CASE("Build_Fails_WhenBodyNumericFieldsAreInvalid", "[builder]") {
     }
 }
 
+TEST_CASE("Build_Fails_WhenSiblingChildSpheresMayOverlap", "[builder]") {
+    BodyDef root = valid_root();
+
+    auto require_invalid = [&](BodyDef a, BodyDef b) {
+        BodySystemBuilder builder;
+        builder.add_body(root);
+        builder.add_body(a);
+        builder.add_body(b);
+        BodySystem sys;
+        REQUIRE(builder.build(sys) == SolveStatus::InvalidInput);
+    };
+
+    SECTION("different orbit radii can bring SOIs into contact") {
+        BodyDef a = valid_child();
+        a.id = 1;
+        a.orbit_radius = 1000.0;
+        a.soi_radius = 60.0;
+        a.radius = 10.0;
+
+        BodyDef b = valid_child();
+        b.id = 2;
+        b.orbit_radius = 1090.0;
+        b.soi_radius = 40.0;
+        b.radius = 10.0;
+
+        require_invalid(a, b);
+    }
+
+    SECTION("same angular rate and phase can make physical radii overlap") {
+        BodyDef a = valid_child();
+        a.id = 1;
+        a.orbit_radius = 1000.0;
+        a.angular_rate = 0.01;
+        a.phase_at_epoch = 0.0;
+        a.soi_radius = 20.0;
+        a.radius = 10.0;
+
+        BodyDef b = valid_child();
+        b.id = 2;
+        b.orbit_radius = 1000.0;
+        b.angular_rate = 0.01;
+        b.phase_at_epoch = 0.0;
+        b.soi_radius = 20.0;
+        b.radius = 10.0;
+
+        require_invalid(a, b);
+    }
+}
+
 TEST_CASE("Build_Succeeds_OnValidStarPlanetMoonTree", "[builder]") {
     BodySystemBuilder b;
     add_star_planet_moon(b);

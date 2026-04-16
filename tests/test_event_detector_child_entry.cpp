@@ -124,16 +124,42 @@ TEST_CASE("FindNextEvent_ReturnsEarliestChildEntryAmongMultipleChildren",
 
 TEST_CASE("FindNextEvent_UsesLowestBodyIdWhenSiblingEntriesTieWithinTimeEpsilon",
           "[phase3][child_entry]") {
-    // Two children at identical position (same orbit_radius and phase). SOIs fully overlap.
-    // Entry occurs simultaneously; lowest BodyId should win.
-    BodySystem sys = build_two_stationary_children(10, 0.0, 20, 0.0, 5.0, 50.0);
+    // Two non-overlapping children on the +X axis. High spacecraft speed makes their
+    // entry times differ by less than time_epsilon; lowest BodyId should win.
+    BodySystemBuilder b;
+    BodyDef root{};
+    root.id = 1;
+    root.parent_id = InvalidBody;
+    root.mu = 1.0;
+    root.radius = 0.5;
+    root.soi_radius = 1000.0;
+    b.add_body(root);
+
+    BodyDef child_a{};
+    child_a.id = 10;
+    child_a.parent_id = 1;
+    child_a.mu = 0.001;
+    child_a.radius = 0.1;
+    child_a.soi_radius = 1.0;
+    child_a.orbit_radius = 50.0;
+    child_a.angular_rate = 0.0;
+    child_a.phase_at_epoch = 0.0;
+    b.add_body(child_a);
+
+    BodyDef child_b = child_a;
+    child_b.id = 20;
+    child_b.orbit_radius = 52.1;
+    b.add_body(child_b);
+
+    BodySystem sys;
+    REQUIRE(b.build(sys) == SolveStatus::Ok);
     EventDetector det(sys);
 
     EventSearchRequest req;
     req.central_body = 1;
     req.start_time = 0.0;
-    req.initial_state = State2{{30.0, 0.1}, {10.0, 0.0}};
-    req.time_limit = 10.0;
+    req.initial_state = State2{{30.0, 0.0}, {3000000.0, 0.0}};
+    req.time_limit = 0.00001;
 
     PredictedEvent event;
     REQUIRE(det.find_next_event(req, event) == SolveStatus::Ok);

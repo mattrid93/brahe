@@ -104,18 +104,18 @@ TEST_CASE("BuildPreview_IsIndependentOfBodyInsertionOrder", "[phase4][determinis
 }
 
 TEST_CASE("ChildEntryTieBreak_RemainsStableAcrossRepeatedRuns", "[phase4][determinism]") {
-    // Two children at the identical location (same orbit, same phase). Their
-    // SOIs overlap and an entry event is ambiguous. Phase 3 resolves this by
-    // lowest BodyId. Phase 4 must preserve that choice identically run-to-run.
-    BodyDef defs[] = {make_sun(), make_moon(10, 50.0, 0.0), make_moon(20, 50.0, 0.0)};
+    // Two non-overlapping children on the +X axis. At high spacecraft speed, their
+    // entry events fall within time_epsilon. Phase 3 resolves this by lowest BodyId;
+    // Phase 4 must preserve that choice identically run-to-run.
+    BodyDef defs[] = {make_sun(), make_moon(10, 50.0, 0.0), make_moon(20, 60.1, 0.0)};
     BodySystem sys = build_with_order(defs, 3);
     TrajectoryBuilder tb(sys);
 
     PreviewRequest req;
     req.central_body = kSun;
     req.start_time = 0.0;
-    req.initial_state = State2{{30.0, 0.01}, {5.0, 0.0}};
-    req.end_time = 20.0;
+    req.initial_state = State2{{30.0, 0.0}, {20000000.0, 0.0}};
+    req.end_time = 0.00001;
     req.max_segments = 8;
 
     Trajectory a, b;
