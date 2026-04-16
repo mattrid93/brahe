@@ -292,15 +292,16 @@ SolveStatus EventDetector::find_next_event(const EventSearchRequest& req,
 
         // --- Impact bracket ---
         double f_imp_hi = eval_impact(s_hi);
+        auto f_impact_of_t = [&](double t) {
+            State2 s;
+            (void)propagate_by(mu, req.initial_state, t - req.start_time, s);
+            return eval_impact(s);
+        };
         if (f_imp_lo > 0.0 && f_imp_hi <= 0.0) {
-            auto f_of_t = [&](double t) {
-                State2 s;
-                (void)propagate_by(mu, req.initial_state, t - req.start_time, s);
-                return eval_impact(s);
-            };
             double t_root = t_lo;
             SolveStatus rs = detail::refine_root_bisection(
-                f_of_t, t_lo, t_hi, f_imp_lo, f_imp_hi, root_eps, max_iter, t_root);
+                f_impact_of_t, t_lo, t_hi, f_imp_lo, f_imp_hi, root_eps, max_iter,
+                t_root);
             if (rs != SolveStatus::Ok) return rs;
 
             State2 s_root;
@@ -312,19 +313,57 @@ SolveStatus EventDetector::find_next_event(const EventSearchRequest& req,
             ev.to_body = InvalidBody;
             ev.state = s_root;
             consider(ev);
+        } else if (f_imp_lo > 0.0 && f_imp_hi > 0.0) {
+            double t_min = t_lo;
+            double f_min = f_imp_lo;
+            SolveStatus ms = detail::refine_minimum(
+                f_impact_of_t, t_lo, t_hi, root_eps, max_iter, t_min, f_min);
+            if (ms != SolveStatus::Ok && f_min > root_eps) {
+                // The bounded minimum search did not converge, but the best
+                // sampled value is still comfortably outside the boundary.
+                // Continue scanning instead of treating a non-candidate window
+                // as an event-refinement failure.
+                f_imp_lo = f_imp_hi;
+            } else if (ms != SolveStatus::Ok) {
+                return ms;
+            }
+
+            if (ms == SolveStatus::Ok && f_min <= root_eps) {
+                double t_event = t_min;
+                if (f_min <= 0.0 && t_min > t_lo + time_eps) {
+                    double t_root = t_lo;
+                    SolveStatus rs = detail::refine_root_bisection(
+                        f_impact_of_t, t_lo, t_min, f_imp_lo, f_min, root_eps, max_iter,
+                        t_root);
+                    if (rs != SolveStatus::Ok) return rs;
+                    t_event = t_root;
+                }
+
+                State2 s_event;
+                (void)propagate_by(mu, req.initial_state, t_event - req.start_time,
+                                   s_event);
+                PredictedEvent ev;
+                ev.type = EventType::Impact;
+                ev.time = t_event;
+                ev.from_body = req.central_body;
+                ev.to_body = InvalidBody;
+                ev.state = s_event;
+                consider(ev);
+            }
         }
 
         // --- SOI exit bracket ---
         double f_exit_hi = eval_exit(s_hi);
+        auto f_exit_of_t = [&](double t) {
+            State2 s;
+            (void)propagate_by(mu, req.initial_state, t - req.start_time, s);
+            return eval_exit(s);
+        };
         if (f_exit_lo < 0.0 && f_exit_hi >= 0.0) {
-            auto f_of_t = [&](double t) {
-                State2 s;
-                (void)propagate_by(mu, req.initial_state, t - req.start_time, s);
-                return eval_exit(s);
-            };
             double t_root = t_lo;
             SolveStatus rs = detail::refine_root_bisection(
-                f_of_t, t_lo, t_hi, f_exit_lo, f_exit_hi, root_eps, max_iter, t_root);
+                f_exit_of_t, t_lo, t_hi, f_exit_lo, f_exit_hi, root_eps, max_iter,
+                t_root);
             if (rs != SolveStatus::Ok) return rs;
 
             State2 s_root;
@@ -336,6 +375,44 @@ SolveStatus EventDetector::find_next_event(const EventSearchRequest& req,
             ev.to_body = parent_id;
             ev.state = s_root;
             consider(ev);
+        } else if (f_exit_lo < 0.0 && f_exit_hi < 0.0) {
+            auto neg_exit_of_t = [&](double t) { return -f_exit_of_t(t); };
+            double t_max = t_lo;
+            double neg_f_max = -f_exit_lo;
+            SolveStatus ms = detail::refine_minimum(
+                neg_exit_of_t, t_lo, t_hi, root_eps, max_iter, t_max, neg_f_max);
+
+            double f_max = -neg_f_max;
+            if (ms != SolveStatus::Ok && f_max < -root_eps) {
+                // As above, non-convergence in a non-candidate window should not
+                // mask ordinary monotonic scan progress.
+                f_exit_lo = f_exit_hi;
+            } else if (ms != SolveStatus::Ok) {
+                return ms;
+            }
+
+            if (ms == SolveStatus::Ok && f_max >= -root_eps) {
+                double t_event = t_max;
+                if (f_max >= 0.0 && t_max > t_lo + time_eps) {
+                    double t_root = t_lo;
+                    SolveStatus rs = detail::refine_root_bisection(
+                        f_exit_of_t, t_lo, t_max, f_exit_lo, f_max, root_eps, max_iter,
+                        t_root);
+                    if (rs != SolveStatus::Ok) return rs;
+                    t_event = t_root;
+                }
+
+                State2 s_event;
+                (void)propagate_by(mu, req.initial_state, t_event - req.start_time,
+                                   s_event);
+                PredictedEvent ev;
+                ev.type = EventType::SoiExit;
+                ev.time = t_event;
+                ev.from_body = req.central_body;
+                ev.to_body = parent_id;
+                ev.state = s_event;
+                consider(ev);
+            }
         }
 
         // --- Child entry brackets ---
