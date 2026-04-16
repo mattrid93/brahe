@@ -273,18 +273,18 @@ SolveStatus EventDetector::find_next_event(const EventSearchRequest& req,
                 SolveStatus rs = detail::refine_root_bisection(
                     f_of_t, t_lo, t_valid_lo, f_imp_lo, f_imp_end, root_eps, max_iter,
                     t_root);
-                if (rs == SolveStatus::Ok) {
-                    State2 s_root;
-                    (void)propagate_by(mu, req.initial_state, t_root - req.start_time,
-                                       s_root);
-                    PredictedEvent ev;
-                    ev.type = EventType::Impact;
-                    ev.time = t_root;
-                    ev.from_body = req.central_body;
-                    ev.to_body = InvalidBody;
-                    ev.state = s_root;
-                    consider(ev);
-                }
+                if (rs != SolveStatus::Ok) return rs;
+
+                State2 s_root;
+                (void)propagate_by(mu, req.initial_state, t_root - req.start_time,
+                                   s_root);
+                PredictedEvent ev;
+                ev.type = EventType::Impact;
+                ev.time = t_root;
+                ev.from_body = req.central_body;
+                ev.to_body = InvalidBody;
+                ev.state = s_root;
+                consider(ev);
             }
             if (have_best) out = best;
             return SolveStatus::Ok;
@@ -301,18 +301,17 @@ SolveStatus EventDetector::find_next_event(const EventSearchRequest& req,
             double t_root = t_lo;
             SolveStatus rs = detail::refine_root_bisection(
                 f_of_t, t_lo, t_hi, f_imp_lo, f_imp_hi, root_eps, max_iter, t_root);
-            if (rs == SolveStatus::Ok) {
-                State2 s_root;
-                (void)propagate_by(mu, req.initial_state, t_root - req.start_time, s_root);
-                PredictedEvent ev;
-                ev.type = EventType::Impact;
-                ev.time = t_root;
-                ev.from_body = req.central_body;
-                ev.to_body = InvalidBody;
-                ev.state = s_root;
-                consider(ev);
-            }
-            // Refinement failure: leave the default TimeLimit / best-so-far output alone.
+            if (rs != SolveStatus::Ok) return rs;
+
+            State2 s_root;
+            (void)propagate_by(mu, req.initial_state, t_root - req.start_time, s_root);
+            PredictedEvent ev;
+            ev.type = EventType::Impact;
+            ev.time = t_root;
+            ev.from_body = req.central_body;
+            ev.to_body = InvalidBody;
+            ev.state = s_root;
+            consider(ev);
         }
 
         // --- SOI exit bracket ---
@@ -326,18 +325,17 @@ SolveStatus EventDetector::find_next_event(const EventSearchRequest& req,
             double t_root = t_lo;
             SolveStatus rs = detail::refine_root_bisection(
                 f_of_t, t_lo, t_hi, f_exit_lo, f_exit_hi, root_eps, max_iter, t_root);
-            if (rs == SolveStatus::Ok) {
-                State2 s_root;
-                (void)propagate_by(mu, req.initial_state, t_root - req.start_time, s_root);
-                PredictedEvent ev;
-                ev.type = EventType::SoiExit;
-                ev.time = t_root;
-                ev.from_body = req.central_body;
-                ev.to_body = parent_id;
-                ev.state = s_root;
-                consider(ev);
-            }
-            // Refinement failure: leave the default TimeLimit / best-so-far output alone.
+            if (rs != SolveStatus::Ok) return rs;
+
+            State2 s_root;
+            (void)propagate_by(mu, req.initial_state, t_root - req.start_time, s_root);
+            PredictedEvent ev;
+            ev.type = EventType::SoiExit;
+            ev.time = t_root;
+            ev.from_body = req.central_body;
+            ev.to_body = parent_id;
+            ev.state = s_root;
+            consider(ev);
         }
 
         // --- Child entry brackets ---
@@ -355,23 +353,24 @@ SolveStatus EventDetector::find_next_event(const EventSearchRequest& req,
                 double t_root = t_lo;
                 SolveStatus rs = detail::refine_root_bisection(
                     f_of_t, t_lo, t_hi, f_ch_lo, f_ch_hi, root_eps, max_iter, t_root);
-                if (rs == SolveStatus::Ok) {
-                    State2 s_root;
-                    (void)propagate_by(mu, req.initial_state, t_root - req.start_time, s_root);
-                    PredictedEvent ev;
-                    ev.type = EventType::SoiEntry;
-                    ev.time = t_root;
-                    ev.from_body = req.central_body;
-                    ev.to_body = child_id;
-                    ev.state = s_root;
-                    consider(ev);
-                }
-                // Refinement failure: leave the default TimeLimit / best-so-far alone.
+                if (rs != SolveStatus::Ok) return rs;
+
+                State2 s_root;
+                (void)propagate_by(mu, req.initial_state, t_root - req.start_time, s_root);
+                PredictedEvent ev;
+                ev.type = EventType::SoiEntry;
+                ev.time = t_root;
+                ev.from_body = req.central_body;
+                ev.to_body = child_id;
+                ev.state = s_root;
+                consider(ev);
             } else if (f_ch_lo > 0.0 && f_ch_hi > 0.0) {
                 double t_min = t_lo;
                 double f_min = f_ch_lo;
                 SolveStatus ms = detail::refine_minimum(
                     f_of_t, t_lo, t_hi, root_eps, max_iter, t_min, f_min);
+                if (ms != SolveStatus::Ok) return ms;
+
                 if (ms == SolveStatus::Ok && f_min <= root_eps) {
                     double t_event = t_min;
                     if (f_min <= 0.0 && t_min > t_lo + time_eps) {
@@ -381,6 +380,8 @@ SolveStatus EventDetector::find_next_event(const EventSearchRequest& req,
                             t_root);
                         if (rs == SolveStatus::Ok) {
                             t_event = t_root;
+                        } else {
+                            return rs;
                         }
                     }
                     State2 s_event;

@@ -174,10 +174,7 @@ TEST_CASE("FindNextEvent_RefinementFailureIsReportedExplicitly", "[phase3][inval
     PredictedEvent event;
     auto status = det.find_next_event(req, event);
     // With zero refinement iterations, a bracketed event cannot be refined.
-    // Either NoConvergence is returned or the scan reports no event -- either way, status
-    // must be deterministic and finite.
+    // The iteration cap is a failure signal, not permission to drop the event.
+    REQUIRE(status == SolveStatus::NoConvergence);
     REQUIRE(std::isfinite(event.time));
-    if (status != SolveStatus::Ok) {
-        REQUIRE(status == SolveStatus::NoConvergence);
-    }
 }
