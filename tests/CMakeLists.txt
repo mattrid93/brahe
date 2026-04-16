@@ -33,6 +33,16 @@ add_executable(brahe_tests
     test_event_properties.cpp
     test_event_fuzz.cpp
     test_event_moving_bodies.cpp
+    test_trajectory_api.cpp
+    test_patcher.cpp
+    test_patch_continuity.cpp
+    test_patch_suppression.cpp
+    test_single_segment.cpp
+    test_segment_chaining.cpp
+    test_trajectory_fixed.cpp
+    test_phase4_determinism.cpp
+    test_phase4_properties.cpp
+    test_phase4_fuzz.cpp
 )
 target_link_libraries(brahe_tests PRIVATE brahe_lib Catch2::Catch2WithMain)
 target_compile_options(brahe_tests PRIVATE -Wall -Wextra -Wpedantic)

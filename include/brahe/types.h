@@ -22,7 +22,14 @@ enum class ConicType { Ellipse, ParabolaLike, Hyperbola };
 
 enum class EventType { None, Impact, SoiEntry, SoiExit, Burn, TimeLimit };
 
-enum class SolveStatus { Ok, InvalidInput, NoConvergence, NoSolution, NumericalFailure };
+enum class SolveStatus {
+    Ok,
+    InvalidInput,
+    NoConvergence,
+    NoSolution,
+    NumericalFailure,
+    CapacityExceeded
+};
 
 enum class LambertDirection { CCW, CW };
 
