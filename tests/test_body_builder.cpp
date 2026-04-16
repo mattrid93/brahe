@@ -2,6 +2,9 @@
 
 #include "brahe/body_system.h"
 
+#include <cmath>
+#include <limits>
+
 using namespace brahe;
 
 // Helper: minimal valid star-planet-moon system
@@ -36,6 +39,29 @@ static void add_star_planet_moon(BodySystemBuilder& b) {
     b.add_body(star);
     b.add_body(planet);
     b.add_body(moon);
+}
+
+static BodyDef valid_root() {
+    BodyDef root;
+    root.id = 0;
+    root.parent_id = InvalidBody;
+    root.mu = 1.0e10;
+    root.radius = 100.0;
+    root.soi_radius = 1e9;
+    return root;
+}
+
+static BodyDef valid_child() {
+    BodyDef child;
+    child.id = 1;
+    child.parent_id = 0;
+    child.mu = 1.0e6;
+    child.radius = 10.0;
+    child.soi_radius = 1000.0;
+    child.orbit_radius = 10000.0;
+    child.angular_rate = 0.001;
+    child.phase_at_epoch = 0.0;
+    return child;
 }
 
 // --- B. Builder and hierarchy validation tests ---
@@ -232,6 +258,78 @@ TEST_CASE("Build_Fails_WhenChildSoiDoesNotFitOrbit", "[builder]") {
 
     BodySystem sys;
     REQUIRE(b.build(sys) == SolveStatus::InvalidInput);
+}
+
+TEST_CASE("Build_Fails_WhenRootSoiNotLargerThanRadius", "[builder]") {
+    BodySystemBuilder b;
+    BodyDef root = valid_root();
+    root.soi_radius = root.radius;
+
+    b.add_body(root);
+
+    BodySystem sys;
+    REQUIRE(b.build(sys) == SolveStatus::InvalidInput);
+}
+
+TEST_CASE("Build_Fails_WhenBodyNumericFieldsAreInvalid", "[builder]") {
+    const double inf = std::numeric_limits<double>::infinity();
+    const double nan = std::numeric_limits<double>::quiet_NaN();
+
+    auto require_invalid = [](BodyDef root, BodyDef child) {
+        BodySystemBuilder b;
+        b.add_body(root);
+        b.add_body(child);
+        BodySystem sys;
+        REQUIRE(b.build(sys) == SolveStatus::InvalidInput);
+    };
+
+    SECTION("root mu must be positive and finite") {
+        BodyDef root = valid_root();
+        root.mu = 0.0;
+        require_invalid(root, valid_child());
+
+        root = valid_root();
+        root.mu = nan;
+        require_invalid(root, valid_child());
+    }
+
+    SECTION("root radius and SOI must be finite") {
+        BodyDef root = valid_root();
+        root.radius = -1.0;
+        require_invalid(root, valid_child());
+
+        root = valid_root();
+        root.soi_radius = inf;
+        require_invalid(root, valid_child());
+    }
+
+    SECTION("child core fields must be positive and finite") {
+        BodyDef child = valid_child();
+        child.mu = -1.0;
+        require_invalid(valid_root(), child);
+
+        child = valid_child();
+        child.radius = nan;
+        require_invalid(valid_root(), child);
+
+        child = valid_child();
+        child.soi_radius = inf;
+        require_invalid(valid_root(), child);
+    }
+
+    SECTION("child orbit fields must be finite") {
+        BodyDef child = valid_child();
+        child.orbit_radius = nan;
+        require_invalid(valid_root(), child);
+
+        child = valid_child();
+        child.angular_rate = inf;
+        require_invalid(valid_root(), child);
+
+        child = valid_child();
+        child.phase_at_epoch = nan;
+        require_invalid(valid_root(), child);
+    }
 }
 
 TEST_CASE("Build_Succeeds_OnValidStarPlanetMoonTree", "[builder]") {

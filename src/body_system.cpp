@@ -12,6 +12,14 @@ namespace {
 
 constexpr BodyId kEmptyChildrenSentinel = InvalidBody;
 
+bool is_positive_finite(double value) {
+    return std::isfinite(value) && value > 0.0;
+}
+
+bool is_finite(double value) {
+    return std::isfinite(value);
+}
+
 } // namespace
 
 // --- BodySystemBuilder ---
@@ -70,15 +78,28 @@ SolveStatus BodySystemBuilder::build(BodySystem& out) const {
         return SolveStatus::InvalidInput; // no root
     }
 
-    // Validate constraints for non-root bodies
+    // Validate numeric fields and hierarchy-dependent constraints.
     for (size_t i = 0; i < n; ++i) {
         const auto& def = sorted[i];
-        if (i == root_idx) continue;
 
-        if (def.orbit_radius <= 0.0) {
+        if (!is_positive_finite(def.mu)) {
+            return SolveStatus::InvalidInput;
+        }
+        if (!is_finite(def.radius) || def.radius < 0.0) {
+            return SolveStatus::InvalidInput;
+        }
+        if (!is_positive_finite(def.soi_radius)) {
             return SolveStatus::InvalidInput;
         }
         if (def.soi_radius <= def.radius) {
+            return SolveStatus::InvalidInput;
+        }
+        if (i == root_idx) continue;
+
+        if (!is_positive_finite(def.orbit_radius)) {
+            return SolveStatus::InvalidInput;
+        }
+        if (!is_finite(def.angular_rate) || !is_finite(def.phase_at_epoch)) {
             return SolveStatus::InvalidInput;
         }
         if (def.soi_radius >= def.orbit_radius) {
