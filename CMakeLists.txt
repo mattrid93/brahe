@@ -20,3 +20,8 @@ if(BRAHE_BUILD_TESTS)
     enable_testing()
     add_subdirectory(tests)
 endif()
+
+option(BRAHE_BUILD_PYTHON "Build Python bindings" OFF)
+if(BRAHE_BUILD_PYTHON)
+    add_subdirectory(bindings)
+endif()

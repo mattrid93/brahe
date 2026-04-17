@@ -1,6 +1,10 @@
 # Build directories
 build/
 cmake-build-*/
+.venv/
+.pytest_cache/
+__pycache__/
+*.egg-info/
 
 # CMake generated files
 CMakeCache.txt

@@ -1,0 +1,20 @@
+[build-system]
+requires = ["scikit-build-core>=0.10", "pybind11>=2.12"]
+build-backend = "scikit_build_core.build"
+
+[project]
+name = "brahe"
+version = "0.1.0"
+description = "2D patched-conic trajectory tools"
+requires-python = ">=3.9"
+dependencies = []
+
+[project.optional-dependencies]
+plot = ["numpy", "matplotlib"]
+widgets = ["numpy", "matplotlib", "ipywidgets"]
+test = ["pytest", "numpy"]
+
+[tool.scikit-build]
+wheel.packages = ["python/brahe"]
+cmake.define.BRAHE_BUILD_TESTS = "OFF"
+cmake.define.BRAHE_BUILD_PYTHON = "ON"
