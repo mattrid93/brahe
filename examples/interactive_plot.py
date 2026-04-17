@@ -206,12 +206,14 @@ def format_status(status, trajectory):
 
 def open_interactive_plot(args):
     import matplotlib.pyplot as plt
+    from matplotlib.patches import Circle
     from matplotlib.widgets import Button, Slider
 
     fig, ax = plt.subplots(figsize=(9, 7))
     fig.subplots_adjust(left=0.10, right=0.96, bottom=0.42, top=0.92)
 
     status_text = fig.text(0.10, 0.95, "", ha="left", va="center")
+    time_text = fig.text(0.10, 0.925, "", ha="left", va="center")
     sample_count = max(8, args.samples)
 
     slider_axes = {
@@ -243,10 +245,136 @@ def open_interactive_plot(args):
         ),
     }
 
+    play_ax = fig.add_axes((0.68, 0.015, 0.10, 0.04))
+    play_button = Button(play_ax, "Play")
     reset_ax = fig.add_axes((0.80, 0.015, 0.10, 0.04))
     reset_button = Button(reset_ax, "Reset")
 
+    animation = {
+        "system": None,
+        "samples": None,
+        "frame": 0,
+        "playing": False,
+        "trail": None,
+        "craft": None,
+        "time_marker": None,
+        "body_artists": [],
+    }
+    timer = fig.canvas.new_timer(interval=args.animation_interval_ms)
+
+    def stop_animation():
+        animation["playing"] = False
+        timer.stop()
+        play_button.label.set_text("Play")
+
+    def clear_animation_artists():
+        for key in ("trail", "craft", "time_marker"):
+            artist = animation.get(key)
+            if artist is not None:
+                artist.remove()
+                animation[key] = None
+        for artists in animation["body_artists"]:
+            for artist in artists:
+                artist.remove()
+        animation["body_artists"] = []
+        time_text.set_text("")
+
+    def update_animation_frame(frame):
+        samples = animation["samples"]
+        system = animation["system"]
+        if not samples or system is None:
+            return
+
+        frame = max(0, min(frame, len(samples["t"]) - 1))
+        animation["frame"] = frame
+
+        xs = samples["x"][: frame + 1]
+        ys = samples["y"][: frame + 1]
+        t = samples["t"][frame]
+
+        animation["trail"].set_data(xs, ys)
+        animation["craft"].set_data([samples["x"][frame]], [samples["y"][frame]])
+        time_label = f"t = {t / SECONDS_PER_DAY:.3f} d"
+        animation["time_marker"].set_text(time_label)
+        time_text.set_text(time_label)
+
+        for body_id, marker, soi_circle, label in animation["body_artists"]:
+            body_state = system.state_in_root_frame(body_id, t)
+            x = body_state.r.x
+            y = body_state.r.y
+            marker.set_data([x], [y])
+            soi_circle.center = (x, y)
+            label.set_position((x, y))
+
+        fig.canvas.draw_idle()
+
+    def setup_animation_overlay(system, trajectory):
+        clear_animation_artists()
+        samples = brahe.sample_trajectory(
+            trajectory, system, samples_per_segment=sample_count, frame="root"
+        )
+        animation["system"] = system
+        animation["samples"] = samples
+        animation["frame"] = 0
+
+        (trail,) = ax.plot([], [], color="black", linewidth=2.0, label="craft trail")
+        (craft,) = ax.plot(
+            [], [], marker="o", color="red", markersize=6, linestyle="", label="craft"
+        )
+        time_marker = ax.text(
+            0.02,
+            0.98,
+            "",
+            transform=ax.transAxes,
+            ha="left",
+            va="top",
+            bbox={"facecolor": "white", "alpha": 0.75, "edgecolor": "none"},
+        )
+
+        animation["trail"] = trail
+        animation["craft"] = craft
+        animation["time_marker"] = time_marker
+
+        body_artists = []
+        start_time = samples["t"][0] if samples["t"] else 0.0
+        for body_id in system.body_ids():
+            body = system.get_body(body_id)
+            if body is None:
+                continue
+            body_state = system.state_in_root_frame(body_id, start_time)
+            x = body_state.r.x
+            y = body_state.r.y
+            (marker,) = ax.plot(
+                [x], [y], marker="o", linestyle="", markersize=5, label=f"body {body_id}"
+            )
+            soi_circle = Circle(
+                (x, y), body.soi_radius, fill=False, linewidth=0.8, alpha=0.18
+            )
+            ax.add_patch(soi_circle)
+            label = ax.annotate(str(body_id), (x, y), textcoords="offset points",
+                                xytext=(4, 4))
+            body_artists.append((body_id, marker, soi_circle, label))
+        animation["body_artists"] = body_artists
+        update_animation_frame(0)
+
+    def advance_animation():
+        if not animation["playing"]:
+            return
+        samples = animation["samples"]
+        if not samples:
+            stop_animation()
+            return
+        next_frame = animation["frame"] + 1
+        if next_frame >= len(samples["t"]):
+            stop_animation()
+            return
+        update_animation_frame(next_frame)
+
+    timer.add_callback(advance_animation)
+
     def redraw(_=None):
+        stop_animation()
+        clear_animation_artists()
         conditions = make_conditions(
             args,
             sliders["x0"].val,
@@ -273,9 +401,10 @@ def open_interactive_plot(args):
                 trajectory,
                 ax=ax,
                 samples_per_segment=sample_count,
-                show_bodies=True,
+                show_bodies=False,
                 show_events=True,
             )
+            setup_animation_overlay(system, trajectory)
             ax.set_title("Earth-Moon free-return-style trajectory preview")
             ax.legend(loc="upper right", fontsize="small")
             status_text.set_text(format_status(status, trajectory))
@@ -294,12 +423,27 @@ def open_interactive_plot(args):
             )
         fig.canvas.draw_idle()
 
+    def toggle_play(_=None):
+        samples = animation["samples"]
+        if not samples:
+            return
+        if animation["playing"]:
+            stop_animation()
+            return
+        if animation["frame"] >= len(samples["t"]) - 1:
+            update_animation_frame(0)
+        animation["playing"] = True
+        play_button.label.set_text("Pause")
+        timer.start()
+
     def reset(_=None):
+        stop_animation()
         for slider in sliders.values():
             slider.reset()
 
     for slider in sliders.values():
         slider.on_changed(redraw)
+    play_button.on_clicked(toggle_play)
     reset_button.on_clicked(reset)
 
     redraw()
@@ -377,6 +521,7 @@ def parse_args():
     parser.add_argument("--moon-mu", type=float, default=MOON_MU)
     parser.add_argument("--max-segments", type=int, default=8)
     parser.add_argument("--samples", type=int, default=240)
+    parser.add_argument("--animation-interval-ms", type=int, default=40)
     parser.add_argument("--failure-log", default=DEFAULT_FAILURE_LOG)
     parser.add_argument(
         "--replay-failure",
