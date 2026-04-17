@@ -54,18 +54,43 @@ double eccentric_to_mean_anomaly(double E, double e) {
 }
 
 SolveStatus mean_to_eccentric_anomaly(double M, double e, double& out_E, int max_iterations) {
-    // Newton's method: f(E) = E - e*sin(E) - M, f'(E) = 1 - e*cos(E)
-    double E = M + e * std::sin(M); // initial guess (first-order correction)
-    double tol = kKeplerTol * std::max(1.0, std::abs(M));
+    double M_reduced = wrap_angle(M);
+    double offset = M - M_reduced;
+    if (M_reduced == 0.0) {
+        out_E = offset;
+        return SolveStatus::Ok;
+    }
+
+    // f(E) = E - e*sin(E) - M is monotonic for 0 <= e < 1. Solve the reduced
+    // anomaly in a bracket and add whole revolutions back to the result.
+    double sign = (M_reduced < 0.0) ? -1.0 : 1.0;
+    double target = std::abs(M_reduced);
+    double lo = 0.0;
+    double hi = M_PI;
+    auto residual = [&](double E) { return E - e * std::sin(E) - target; };
+
+    double E = std::clamp(target + e * std::sin(target), lo, hi);
+    double tol = kKeplerTol * std::max(1.0, target);
     for (int i = 0; i < max_iterations; ++i) {
-        double f = E - e * std::sin(E) - M;
+        double f = residual(E);
         if (std::abs(f) < tol) {
-            out_E = E;
+            out_E = offset + sign * E;
             return SolveStatus::Ok;
         }
+
+        if (f > 0.0) {
+            hi = E;
+        } else {
+            lo = E;
+        }
+
         double fp = 1.0 - e * std::cos(E);
         if (std::abs(fp) < 1e-30) return SolveStatus::NumericalFailure;
-        E -= f / fp;
+        double next = E - f / fp;
+        if (!(next > lo && next < hi) || !std::isfinite(next)) {
+            next = 0.5 * (lo + hi);
+        }
+        E = next;
     }
     return SolveStatus::NoConvergence;
 }

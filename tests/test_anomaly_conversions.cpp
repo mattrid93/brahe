@@ -35,6 +35,16 @@ TEST_CASE("MeanToEccentricToMean_RoundTrip_Ellipse", "[phase2][anomaly]") {
     }
 }
 
+TEST_CASE("MeanToEccentric_ConvergesForHighEccentricitySmallMeanAnomaly", "[phase2][anomaly]") {
+    double e = 0.9937767804941645;
+    double M = 0.05128749566606613;
+
+    double E;
+    REQUIRE(mean_to_eccentric_anomaly(M, e, E) == SolveStatus::Ok);
+    double M_back = eccentric_to_mean_anomaly(E, e);
+    REQUIRE_THAT(M_back, WithinAbs(M, 1e-10));
+}
+
 TEST_CASE("EccentricToMean_MonotonicOverPrincipalRange", "[phase2][anomaly]") {
     double e = 0.3;
     double prev_M = eccentric_to_mean_anomaly(-M_PI, e);
