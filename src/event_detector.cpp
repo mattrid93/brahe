@@ -59,6 +59,80 @@ Vec2 child_velocity(const CachedChild& child, double t) {
     return {v_mag * (-std::sin(theta)), v_mag * std::cos(theta)};
 }
 
+struct RadiusCrossing {
+    bool found = false;
+    double dt = 0.0;
+};
+
+void consider_radius_candidate(const ConicElements2D& el, double target_true_anomaly,
+                               double horizon, double time_eps, RadiusCrossing& best) {
+    const double e = el.eccentricity;
+    const double sign_h = (el.angular_momentum_z >= 0.0) ? 1.0 : -1.0;
+    double dt = std::numeric_limits<double>::infinity();
+
+    if (el.type == ConicType::Ellipse) {
+        const double a = el.semi_major_axis;
+        if (a <= 0.0 || !std::isfinite(a)) return;
+
+        const double E = detail::true_to_eccentric_anomaly(target_true_anomaly, e);
+        const double M = detail::eccentric_to_mean_anomaly(E, e);
+        const double n = std::sqrt(el.mu / (a * a * a));
+        double dM = sign_h * (M - el.mean_anomaly);
+        const double min_dM = time_eps * n;
+        while (dM <= min_dM) dM += 2.0 * M_PI;
+        dt = dM / n;
+    } else if (el.type == ConicType::Hyperbola) {
+        const double a = el.semi_major_axis;
+        if (a >= 0.0 || !std::isfinite(a)) return;
+
+        const double H = detail::true_to_hyperbolic_anomaly(target_true_anomaly, e);
+        const double M = detail::hyperbolic_to_mean_anomaly(H, e);
+        const double n = std::sqrt(el.mu / (-a * a * a));
+        dt = (M - el.mean_anomaly) / (sign_h * n);
+    } else {
+        const double p = el.semi_latus_rectum;
+        if (p <= 0.0 || !std::isfinite(p)) return;
+
+        const double D = std::tan(target_true_anomaly / 2.0);
+        const double M = D + D * D * D / 3.0;
+        const double coeff = std::sqrt(2.0 * el.mu / (p * p * p));
+        dt = (M - el.mean_anomaly) / (sign_h * coeff);
+    }
+
+    if (!std::isfinite(dt) || dt <= time_eps || dt > horizon + time_eps) return;
+    if (!best.found || dt < best.dt) {
+        best.found = true;
+        best.dt = std::min(dt, horizon);
+    }
+}
+
+RadiusCrossing first_central_radius_crossing(double mu, const State2& initial,
+                                             double radius, double horizon,
+                                             double time_eps) {
+    RadiusCrossing best;
+    if (mu <= 0.0 || radius <= 0.0 || horizon <= time_eps ||
+        !std::isfinite(mu) || !std::isfinite(radius)) {
+        return best;
+    }
+
+    ConicElements2D el;
+    if (TwoBody::to_elements(mu, initial, el) != SolveStatus::Ok) return best;
+    if (el.semi_latus_rectum <= 0.0 || !std::isfinite(el.semi_latus_rectum)) return best;
+
+    const double e = el.eccentricity;
+    if (e <= 1e-12 || !std::isfinite(e)) return best;
+
+    const double cos_nu = (el.semi_latus_rectum / radius - 1.0) / e;
+    if (cos_nu < -1.0 - 1e-12 || cos_nu > 1.0 + 1e-12) return best;
+
+    const double nu_abs = detail::safe_acos(cos_nu);
+    consider_radius_candidate(el, nu_abs, horizon, time_eps, best);
+    if (nu_abs > 0.0 && nu_abs < M_PI) {
+        consider_radius_candidate(el, -nu_abs, horizon, time_eps, best);
+    }
+    return best;
+}
+
 }  // namespace
 
 EventDetector::EventDetector(const BodySystem& bodies, const Tolerances& tolerances,
@@ -214,6 +288,44 @@ SolveStatus EventDetector::find_next_event(const EventSearchRequest& req,
         if (have_best) out = best;
         else set_time_limit_output();
         return SolveStatus::Ok;
+    }
+
+    // Central body impact and SOI exit depend only on the spacecraft's fixed conic
+    // around the current central body, so solve their radius crossings analytically
+    // before falling back to the coarse scan used for moving child SOIs.
+    {
+        RadiusCrossing crossing =
+            first_central_radius_crossing(mu, req.initial_state, body_radius, horizon,
+                                          time_eps);
+        if (crossing.found) {
+            State2 s_event;
+            SolveStatus ps = propagate_by(mu, req.initial_state, crossing.dt, s_event);
+            if (ps != SolveStatus::Ok) return ps;
+            PredictedEvent ev;
+            ev.type = EventType::Impact;
+            ev.time = req.start_time + crossing.dt;
+            ev.from_body = req.central_body;
+            ev.to_body = InvalidBody;
+            ev.state = s_event;
+            consider(ev);
+        }
+    }
+    {
+        RadiusCrossing crossing =
+            first_central_radius_crossing(mu, req.initial_state, soi_radius, horizon,
+                                          time_eps);
+        if (crossing.found) {
+            State2 s_event;
+            SolveStatus ps = propagate_by(mu, req.initial_state, crossing.dt, s_event);
+            if (ps != SolveStatus::Ok) return ps;
+            PredictedEvent ev;
+            ev.type = EventType::SoiExit;
+            ev.time = req.start_time + crossing.dt;
+            ev.from_body = req.central_body;
+            ev.to_body = parent_id;
+            ev.state = s_event;
+            consider(ev);
+        }
     }
 
     // --- Step 5: coarse scan step size ---

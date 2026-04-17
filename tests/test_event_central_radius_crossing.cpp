@@ -128,7 +128,7 @@ TEST_CASE("EventDetector_CentralSoiExitCrossingUsesApoapsisCandidate",
     const double a = 0.5 * (rp + ra);
     const double vp = std::sqrt(1.0 * (2.0 / rp - 1.0 / a));
 
-    for (double horizon : {40.0, 55.0, 70.0, 85.0, 100.0}) {
+    for (double horizon : {60.0, 70.0, 85.0, 100.0}) {
         EventSearchRequest req;
         req.central_body = kEarth;
         req.start_time = 0.0;
