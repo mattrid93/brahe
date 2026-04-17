@@ -6,7 +6,7 @@ import argparse
 import brahe
 
 
-def make_demo_system():
+def make_demo_system(child_mu=1.0, child_orbit_radius=28.0):
     sun = brahe.BodyDef()
     sun.id = 0
     sun.parent_id = brahe.InvalidBody
@@ -17,10 +17,10 @@ def make_demo_system():
     moon = brahe.BodyDef()
     moon.id = 1
     moon.parent_id = 0
-    moon.mu = 1.0
+    moon.mu = child_mu
     moon.radius = 0.35
     moon.soi_radius = 4.0
-    moon.orbit_radius = 28.0
+    moon.orbit_radius = child_orbit_radius
     moon.angular_rate = 0.18
     moon.phase_at_epoch = 0.45
 
@@ -65,20 +65,20 @@ def open_interactive_plot(args):
     import matplotlib.pyplot as plt
     from matplotlib.widgets import Button, Slider
 
-    system = make_demo_system()
-
     fig, ax = plt.subplots(figsize=(9, 7))
-    fig.subplots_adjust(left=0.10, right=0.96, bottom=0.34, top=0.92)
+    fig.subplots_adjust(left=0.10, right=0.96, bottom=0.42, top=0.92)
 
     status_text = fig.text(0.10, 0.95, "", ha="left", va="center")
     sample_count = max(8, args.samples)
 
     slider_axes = {
-        "x0": fig.add_axes((0.16, 0.24, 0.72, 0.025)),
-        "y0": fig.add_axes((0.16, 0.20, 0.72, 0.025)),
-        "vx0": fig.add_axes((0.16, 0.16, 0.72, 0.025)),
-        "vy0": fig.add_axes((0.16, 0.12, 0.72, 0.025)),
-        "end_time": fig.add_axes((0.16, 0.08, 0.72, 0.025)),
+        "x0": fig.add_axes((0.18, 0.32, 0.70, 0.025)),
+        "y0": fig.add_axes((0.18, 0.28, 0.70, 0.025)),
+        "vx0": fig.add_axes((0.18, 0.24, 0.70, 0.025)),
+        "vy0": fig.add_axes((0.18, 0.20, 0.70, 0.025)),
+        "end_time": fig.add_axes((0.18, 0.16, 0.70, 0.025)),
+        "child_orbit_radius": fig.add_axes((0.18, 0.12, 0.70, 0.025)),
+        "child_mu": fig.add_axes((0.18, 0.08, 0.70, 0.025)),
     }
     sliders = {
         "x0": Slider(slider_axes["x0"], "x0", 5.0, 70.0, valinit=args.x0),
@@ -88,12 +88,26 @@ def open_interactive_plot(args):
         "end_time": Slider(
             slider_axes["end_time"], "end", 1.0, 30.0, valinit=args.end_time
         ),
+        "child_orbit_radius": Slider(
+            slider_axes["child_orbit_radius"],
+            "child orbit r",
+            8.0,
+            60.0,
+            valinit=args.child_orbit_radius,
+        ),
+        "child_mu": Slider(
+            slider_axes["child_mu"], "child mu", 0.05, 12.0, valinit=args.child_mu
+        ),
     }
 
     reset_ax = fig.add_axes((0.80, 0.015, 0.10, 0.04))
     reset_button = Button(reset_ax, "Reset")
 
     def redraw(_=None):
+        system = make_demo_system(
+            child_mu=sliders["child_mu"].val,
+            child_orbit_radius=sliders["child_orbit_radius"].val,
+        )
         req = build_request(
             sliders["x0"].val,
             sliders["y0"].val,
@@ -131,7 +145,10 @@ def open_interactive_plot(args):
 
 
 def smoke_check(args):
-    system = make_demo_system()
+    system = make_demo_system(
+        child_mu=args.child_mu,
+        child_orbit_radius=args.child_orbit_radius,
+    )
     req = build_request(args.x0, args.y0, args.vx0, args.vy0, args.end_time,
                         args.max_segments)
     status, trajectory = build_trajectory(system, req)
@@ -147,6 +164,8 @@ def parse_args():
     parser.add_argument("--vx0", type=float, default=4.5)
     parser.add_argument("--vy0", type=float, default=7.0)
     parser.add_argument("--end-time", type=float, default=14.0)
+    parser.add_argument("--child-orbit-radius", type=float, default=28.0)
+    parser.add_argument("--child-mu", type=float, default=1.0)
     parser.add_argument("--max-segments", type=int, default=8)
     parser.add_argument("--samples", type=int, default=240)
     parser.add_argument(
