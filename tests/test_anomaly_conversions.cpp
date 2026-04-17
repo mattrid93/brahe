@@ -69,6 +69,16 @@ TEST_CASE("MeanToHyperbolicToMean_RoundTrip_Hyperbola", "[phase2][anomaly]") {
     }
 }
 
+TEST_CASE("MeanToHyperbolic_ConvergesNearParabolicUnitMeanAnomaly", "[phase2][anomaly]") {
+    double e = 1.0196305827783696;
+    double Mh = 0.9999999596267415;
+
+    double H;
+    REQUIRE(mean_to_hyperbolic_anomaly(Mh, e, H) == SolveStatus::Ok);
+    double Mh_back = hyperbolic_to_mean_anomaly(H, e);
+    REQUIRE_THAT(Mh_back, WithinAbs(Mh, 1e-10));
+}
+
 TEST_CASE("HyperbolicConversions_RemainFiniteNearAsymptote", "[phase2][anomaly]") {
     double e = 1.5;
     double nu_max = std::acos(-1.0 / e);

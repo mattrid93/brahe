@@ -99,25 +99,46 @@ double hyperbolic_to_mean_anomaly(double H, double e) {
 }
 
 SolveStatus mean_to_hyperbolic_anomaly(double Mh, double e, double& out_H, int max_iterations) {
-    // Newton's method: f(H) = e*sinh(H) - H - Mh, f'(H) = e*cosh(H) - 1
-    // Initial guess
-    double H;
-    if (std::abs(Mh) < 1.0) {
-        H = Mh / (e - 1.0);
-    } else {
-        H = std::copysign(std::log(2.0 * std::abs(Mh) / e + 1.0), Mh);
+    if (Mh == 0.0) {
+        out_H = 0.0;
+        return SolveStatus::Ok;
     }
 
-    double tol = kKeplerTol * std::max(1.0, std::abs(Mh));
+    // f(H) = e*sinh(H) - H - Mh is monotonic for e > 1. Keep a bracket around
+    // the positive root and use Newton steps only when they stay inside it.
+    double sign = (Mh < 0.0) ? -1.0 : 1.0;
+    double target = std::abs(Mh);
+    double lo = 0.0;
+    double hi = std::max(1.0, std::log(2.0 * target / e + 1.0));
+    auto residual = [&](double H) { return e * std::sinh(H) - H - target; };
+
+    while (residual(hi) < 0.0) {
+        hi *= 2.0;
+        if (!std::isfinite(hi) || hi > 1000.0) return SolveStatus::NumericalFailure;
+    }
+
+    double H = 0.5 * (lo + hi);
+    double tol = kKeplerTol * std::max(1.0, target);
     for (int i = 0; i < max_iterations; ++i) {
-        double f = e * std::sinh(H) - H - Mh;
+        double f = residual(H);
         if (std::abs(f) < tol) {
-            out_H = H;
+            out_H = sign * H;
             return SolveStatus::Ok;
         }
+
+        if (f > 0.0) {
+            hi = H;
+        } else {
+            lo = H;
+        }
+
         double fp = e * std::cosh(H) - 1.0;
         if (std::abs(fp) < 1e-30) return SolveStatus::NumericalFailure;
-        H -= f / fp;
+        double next = H - f / fp;
+        if (!(next > lo && next < hi) || !std::isfinite(next)) {
+            next = 0.5 * (lo + hi);
+        }
+        H = next;
     }
     return SolveStatus::NoConvergence;
 }
