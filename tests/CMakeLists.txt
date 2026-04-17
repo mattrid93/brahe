@@ -21,6 +21,7 @@ add_executable(brahe_tests
     test_invalid_input.cpp
     test_event_api.cpp
     test_event_root_functions.cpp
+    test_event_central_radius_crossing.cpp
     test_event_refinement.cpp
     test_event_coarse_scan.cpp
     test_event_detector_impact.cpp

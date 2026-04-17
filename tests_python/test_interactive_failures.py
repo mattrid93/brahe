@@ -88,3 +88,28 @@ def test_third_logged_failure_builds_without_numerical_failure():
             "y0": 726.9841269841272,
         }
     )
+
+
+def test_default_free_return_impact_is_stable_when_end_time_changes():
+    example = load_interactive_example()
+    system = example.make_demo_system()
+    expected_impact_day = 6.74580583190028
+
+    for end_time_days in (6.75, 6.8, 7.0, 7.5, 8.0, 9.0, 10.0, 12.0, 14.0):
+        req = example.build_request(
+            example.LOW_EARTH_ORBIT_RADIUS,
+            0.0,
+            0.0,
+            example.TLI_SPEED,
+            end_time_days,
+            8,
+        )
+        status, trajectory = example.build_trajectory(system, req)
+
+        assert status == brahe.SolveStatus.Ok
+        assert trajectory.segments[-1].end_reason == brahe.EventType.Impact
+        assert (
+            abs(trajectory.segments[-1].end_time / example.SECONDS_PER_DAY
+                - expected_impact_day)
+            < 1e-5
+        )
