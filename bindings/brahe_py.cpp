@@ -11,6 +11,7 @@
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
 #include <utility>
+#include <vector>
 
 namespace py = pybind11;
 
@@ -86,6 +87,15 @@ private:
     std::shared_ptr<BodySystem> bodies_;
     Tolerances tolerances_;
 };
+
+void append_body_ids(const BodySystem& bodies, BodyId body, std::vector<BodyId>& ids) {
+    ids.push_back(body);
+    const BodyId* begin = bodies.children_begin(body);
+    const BodyId* end = bodies.children_end(body);
+    for (const BodyId* p = begin; p != end; ++p) {
+        append_body_ids(bodies, *p, ids);
+    }
+}
 
 }  // namespace
 }  // namespace brahe
@@ -240,7 +250,20 @@ PYBIND11_MODULE(_brahe, m) {
         .def("state_in_root_frame", &BodySystem::state_in_root_frame)
         .def("root_id", &BodySystem::root_id)
         .def("body_count", &BodySystem::body_count)
-        .def("depth", &BodySystem::depth);
+        .def("depth", &BodySystem::depth)
+        .def("children", [](const BodySystem& self, BodyId id) {
+            std::vector<BodyId> children;
+            const BodyId* begin = self.children_begin(id);
+            const BodyId* end = self.children_end(id);
+            children.assign(begin, end);
+            return children;
+        })
+        .def("body_ids", [](const BodySystem& self) {
+            std::vector<BodyId> ids;
+            BodyId root = self.root_id();
+            if (root != InvalidBody) append_body_ids(self, root, ids);
+            return ids;
+        });
 
     py::class_<BodySystemBuilder>(m, "BodySystemBuilder")
         .def(py::init<>())
