@@ -273,8 +273,8 @@ def open_interactive_plot(args):
             if artist is not None:
                 artist.remove()
                 animation[key] = None
-        for artists in animation["body_artists"]:
-            for artist in artists:
+        for _, marker, soi_circle, label in animation["body_artists"]:
+            for artist in (marker, soi_circle, label):
                 artist.remove()
         animation["body_artists"] = []
         time_text.set_text("")

@@ -150,6 +150,26 @@ class PlottingTests(unittest.TestCase):
         self.assertGreaterEqual(len(ax.lines), 4)
         plt.close(fig)
 
+    def test_body_artist_cleanup_removes_only_artists(self):
+        import matplotlib.pyplot as plt
+        from matplotlib.patches import Circle
+
+        fig, ax = plt.subplots()
+        marker, = ax.plot([0.0], [0.0])
+        soi_circle = Circle((0.0, 0.0), 1.0)
+        ax.add_patch(soi_circle)
+        label = ax.annotate("1", (0.0, 0.0))
+        body_artists = [(1, marker, soi_circle, label)]
+
+        for _, marker, soi_circle, label in body_artists:
+            for artist in (marker, soi_circle, label):
+                artist.remove()
+
+        self.assertEqual(len(ax.lines), 0)
+        self.assertEqual(len(ax.patches), 0)
+        self.assertEqual(len(ax.texts), 0)
+        plt.close(fig)
+
 
 if __name__ == "__main__":
     unittest.main()
