@@ -2,7 +2,14 @@
 from __future__ import annotations
 
 import argparse
+import json
 import math
+import platform
+import subprocess
+import sys
+import traceback
+from datetime import datetime, timezone
+from pathlib import Path
 
 import brahe
 
@@ -21,6 +28,7 @@ MOON_PHASE_DEG = 130.0
 
 LOW_EARTH_ORBIT_RADIUS = 6678.0  # km, roughly 300 km altitude
 TLI_SPEED = 10.85                # km/s
+DEFAULT_FAILURE_LOG = "examples/interactive_failures.jsonl"
 
 
 def make_demo_system(moon_mu=MOON_MU, moon_orbit_radius=MOON_ORBIT_RADIUS):
@@ -50,6 +58,47 @@ def make_demo_system(moon_mu=MOON_MU, moon_orbit_radius=MOON_ORBIT_RADIUS):
     return system
 
 
+def moon_derived_values(moon_mu, moon_orbit_radius):
+    if moon_mu <= 0.0 or moon_orbit_radius <= 0.0:
+        return {
+            "moon_soi_radius": None,
+            "moon_angular_rate": None,
+        }
+    return {
+        "moon_soi_radius": moon_orbit_radius * (moon_mu / EARTH_MU) ** 0.4,
+        "moon_angular_rate": math.sqrt(EARTH_MU / moon_orbit_radius**3),
+    }
+
+
+def current_git_commit():
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--short", "HEAD"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except Exception:
+        return None
+    return result.stdout.strip()
+
+
+def make_conditions(args, x0, y0, vx0, vy0, end_time, moon_mu, moon_orbit_radius):
+    conditions = {
+        "x0": x0,
+        "y0": y0,
+        "vx0": vx0,
+        "vy0": vy0,
+        "end_time_days": end_time,
+        "max_segments": args.max_segments,
+        "samples": args.samples,
+        "moon_mu": moon_mu,
+        "moon_orbit_radius": moon_orbit_radius,
+    }
+    conditions.update(moon_derived_values(moon_mu, moon_orbit_radius))
+    return conditions
+
+
 def build_request(x0, y0, vx0, vy0, end_time, max_segments):
     req = brahe.PreviewRequest()
     req.central_body = EARTH_ID
@@ -58,6 +107,17 @@ def build_request(x0, y0, vx0, vy0, end_time, max_segments):
     req.max_segments = max_segments
     req.initial_state = brahe.State2(brahe.Vec2(x0, y0), brahe.Vec2(vx0, vy0))
     return req
+
+
+def build_request_from_conditions(conditions):
+    return build_request(
+        conditions["x0"],
+        conditions["y0"],
+        conditions["vx0"],
+        conditions["vy0"],
+        conditions["end_time_days"],
+        conditions["max_segments"],
+    )
 
 
 def build_trajectory(system, req):
@@ -69,6 +129,69 @@ def build_trajectory(system, req):
     if status not in {brahe.SolveStatus.Ok, brahe.SolveStatus.CapacityExceeded}:
         raise RuntimeError(f"trajectory build failed: {status!r}")
     return status, trajectory
+
+
+def segment_records(trajectory):
+    return [
+        {
+            "central_body": segment.central_body,
+            "start_time": segment.start_time,
+            "end_time": segment.end_time,
+            "end_reason": segment.end_reason.name,
+            "initial_state": {
+                "rx": segment.initial_state.r.x,
+                "ry": segment.initial_state.r.y,
+                "vx": segment.initial_state.v.x,
+                "vy": segment.initial_state.v.y,
+            },
+        }
+        for segment in trajectory.segments
+    ]
+
+
+def request_record(req):
+    return {
+        "central_body": req.central_body,
+        "start_time": req.start_time,
+        "end_time": req.end_time,
+        "max_segments": req.max_segments,
+        "initial_state": {
+            "rx": req.initial_state.r.x,
+            "ry": req.initial_state.r.y,
+            "vx": req.initial_state.v.x,
+            "vy": req.initial_state.v.y,
+        },
+    }
+
+
+def log_failure(path, conditions, req=None, status=None, trajectory=None, exc=None):
+    if path is None:
+        return
+
+    record = {
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "python": sys.version,
+        "platform": platform.platform(),
+        "git_commit": current_git_commit(),
+        "conditions": conditions,
+    }
+    if req is not None:
+        record["request"] = request_record(req)
+    if status is not None:
+        record["status"] = status.name
+    if trajectory is not None:
+        record["segments"] = segment_records(trajectory)
+    if exc is not None:
+        record["exception"] = {
+            "type": type(exc).__name__,
+            "message": str(exc),
+            "traceback": traceback.format_exc(),
+        }
+
+    log_path = Path(path)
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    with log_path.open("a", encoding="utf-8") as f:
+        f.write(json.dumps(record, sort_keys=True) + "\n")
 
 
 def format_status(status, trajectory):
@@ -124,32 +247,51 @@ def open_interactive_plot(args):
     reset_button = Button(reset_ax, "Reset")
 
     def redraw(_=None):
-        system = make_demo_system(
-            moon_mu=sliders["moon_mu"].val,
-            moon_orbit_radius=sliders["moon_orbit_radius"].val,
-        )
-        req = build_request(
+        conditions = make_conditions(
+            args,
             sliders["x0"].val,
             sliders["y0"].val,
             sliders["vx0"].val,
             sliders["vy0"].val,
             sliders["end_time"].val,
-            args.max_segments,
+            sliders["moon_mu"].val,
+            sliders["moon_orbit_radius"].val,
         )
-        status, trajectory = build_trajectory(system, req)
+        req = None
+        system = None
+        try:
+            system = make_demo_system(
+                moon_mu=conditions["moon_mu"],
+                moon_orbit_radius=conditions["moon_orbit_radius"],
+            )
+            req = build_request_from_conditions(conditions)
+            status, trajectory = build_trajectory(system, req)
 
-        ax.clear()
-        brahe.plot_trajectory(
-            system,
-            trajectory,
-            ax=ax,
-            samples_per_segment=sample_count,
-            show_bodies=True,
-            show_events=True,
-        )
-        ax.set_title("Earth-Moon free-return-style trajectory preview")
-        ax.legend(loc="upper right", fontsize="small")
-        status_text.set_text(format_status(status, trajectory))
+            ax.clear()
+            brahe.plot_trajectory(
+                system,
+                trajectory,
+                ax=ax,
+                samples_per_segment=sample_count,
+                show_bodies=True,
+                show_events=True,
+            )
+            ax.set_title("Earth-Moon free-return-style trajectory preview")
+            ax.legend(loc="upper right", fontsize="small")
+            status_text.set_text(format_status(status, trajectory))
+        except Exception as exc:
+            log_failure(args.failure_log, conditions, req=req, exc=exc)
+            ax.clear()
+            if system is not None:
+                try:
+                    brahe.plot_body_system(system, ax=ax)
+                except Exception:
+                    pass
+            ax.set_title("Trajectory build failed")
+            status_text.set_text(
+                f"{type(exc).__name__}: {exc} "
+                f"(logged to {args.failure_log})"
+            )
         fig.canvas.draw_idle()
 
     def reset(_=None):
@@ -165,14 +307,60 @@ def open_interactive_plot(args):
 
 
 def smoke_check(args):
-    system = make_demo_system(
-        moon_mu=args.moon_mu,
-        moon_orbit_radius=args.moon_orbit_radius,
+    conditions = make_conditions(
+        args,
+        args.x0,
+        args.y0,
+        args.vx0,
+        args.vy0,
+        args.end_time,
+        args.moon_mu,
+        args.moon_orbit_radius,
     )
-    req = build_request(args.x0, args.y0, args.vx0, args.vy0, args.end_time,
-                        args.max_segments)
-    status, trajectory = build_trajectory(system, req)
-    print(format_status(status, trajectory))
+    run_conditions(conditions, failure_log=args.failure_log)
+
+
+def load_failure(path, index):
+    with Path(path).open("r", encoding="utf-8") as f:
+        records = [json.loads(line) for line in f if line.strip()]
+    if not records:
+        raise RuntimeError(f"failure log is empty: {path}")
+    return records[index]
+
+
+def run_conditions(conditions, failure_log=None):
+    req = None
+    trajectory = None
+    status = None
+    try:
+        system = make_demo_system(
+            moon_mu=conditions["moon_mu"],
+            moon_orbit_radius=conditions["moon_orbit_radius"],
+        )
+        req = build_request_from_conditions(conditions)
+        status, trajectory = build_trajectory(system, req)
+        print(format_status(status, trajectory))
+        for i, segment in enumerate(trajectory.segments):
+            print(
+                f"  {i}: body={segment.central_body} "
+                f"event={segment.end_reason.name} "
+                f"t={segment.end_time / SECONDS_PER_DAY:.6f} d"
+            )
+    except Exception as exc:
+        log_failure(
+            failure_log,
+            conditions,
+            req=req,
+            status=status,
+            trajectory=trajectory,
+            exc=exc,
+        )
+        raise
+
+
+def replay_failure(args):
+    record = load_failure(args.replay_failure, args.failure_index)
+    run_conditions(record["conditions"], failure_log=args.failure_log)
 
 
 def parse_args():
@@ -189,6 +377,12 @@ def parse_args():
     parser.add_argument("--moon-mu", type=float, default=MOON_MU)
     parser.add_argument("--max-segments", type=int, default=8)
     parser.add_argument("--samples", type=int, default=240)
+    parser.add_argument("--failure-log", default=DEFAULT_FAILURE_LOG)
+    parser.add_argument(
+        "--replay-failure",
+        help="replay conditions from a JSONL failure log instead of using CLI sliders",
+    )
+    parser.add_argument("--failure-index", type=int, default=-1)
     parser.add_argument(
         "--smoke",
         action="store_true",
@@ -199,7 +393,9 @@ def parse_args():
 
 def main():
     args = parse_args()
-    if args.smoke:
+    if args.replay_failure:
+        replay_failure(args)
+    elif args.smoke:
         smoke_check(args)
     else:
         open_interactive_plot(args)
