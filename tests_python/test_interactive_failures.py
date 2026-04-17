@@ -52,3 +52,40 @@ def test_first_logged_failure_plots_without_propagation_error():
         import matplotlib.pyplot as plt
 
         plt.close(fig)
+
+
+def test_second_logged_failure_plots_without_propagation_error():
+    example = load_interactive_example()
+    conditions = {
+        "end_time_days": 7.0,
+        "max_segments": 8,
+        "moon_mu": 4902.800066,
+        "moon_orbit_radius": 384400.0,
+        "samples": 240,
+        "vx0": 0.0,
+        "vy0": 10.85,
+        "x0": 6750.793650793651,
+        "y0": 0.0,
+    }
+
+    system = example.make_demo_system(
+        moon_mu=conditions["moon_mu"],
+        moon_orbit_radius=conditions["moon_orbit_radius"],
+    )
+    req = example.build_request_from_conditions(conditions)
+    status, trajectory = example.build_trajectory(system, req)
+    assert status == brahe.SolveStatus.Ok
+
+    fig, ax = brahe.plot_trajectory(
+        system,
+        trajectory,
+        samples_per_segment=conditions["samples"],
+        show_bodies=True,
+        show_events=True,
+    )
+    try:
+        assert fig is ax.figure
+    finally:
+        import matplotlib.pyplot as plt
+
+        plt.close(fig)
