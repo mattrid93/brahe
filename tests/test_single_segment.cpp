@@ -107,6 +107,25 @@ TEST_CASE("SingleSegment_EndsAtSoiExitEvent", "[phase4][single_segment]") {
     REQUIRE(out.segments[0].central_body == kMoon);
 }
 
+TEST_CASE("SingleSegment_RootSoiExitTerminatesAsEscape", "[phase4][single_segment]") {
+    BodySystem sys = sun_with_moon();
+    TrajectoryBuilder tb(sys);
+
+    PreviewRequest req;
+    req.central_body = kSun;
+    req.start_time = 0.0;
+    req.initial_state = State2{{9.0e5, 0.0}, {1000.0, 0.0}};
+    req.end_time = 1000.0;
+    req.max_segments = 8;
+
+    Trajectory out;
+    SolveStatus status = tb.build_preview(req, out);
+    REQUIRE(status == SolveStatus::Ok);
+    REQUIRE(out.segments.size() == 1);
+    REQUIRE(out.segments[0].end_reason == EventType::SoiExit);
+    REQUIRE(out.segments[0].central_body == kSun);
+}
+
 TEST_CASE("SingleSegment_EndsAtTimeLimitWhenNoEarlierEventOccurs",
           "[phase4][single_segment]") {
     BodySystem sys = sun_with_moon();

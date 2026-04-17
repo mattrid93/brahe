@@ -181,7 +181,8 @@ TEST_CASE("PreviewChain_FinalSegmentAlwaysEndsAtImpactOrTimeLimitOrPatchEvent",
         const EventType final_reason = out.segments.back().end_reason;
         if (status == SolveStatus::Ok) {
             REQUIRE((final_reason == EventType::Impact ||
-                     final_reason == EventType::TimeLimit));
+                     final_reason == EventType::TimeLimit ||
+                     final_reason == EventType::SoiExit));
         } else {
             // CapacityExceeded -> final reason is a patch event.
             REQUIRE(status == SolveStatus::CapacityExceeded);

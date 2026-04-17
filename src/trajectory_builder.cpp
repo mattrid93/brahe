@@ -244,8 +244,11 @@ SolveStatus TrajectoryBuilder::build_preview_into(const PreviewRequest& req,
                                             ch->soi_radius, true};
         } else if (event.type == EventType::SoiExit) {
             const BodyDef* cb_def = bodies_.get_body(cur_cb);
-            if (cb_def == nullptr || cb_def->parent_id == InvalidBody) {
+            if (cb_def == nullptr) {
                 return SolveStatus::NumericalFailure;
+            }
+            if (cb_def->parent_id == InvalidBody) {
+                return SolveStatus::Ok;
             }
             State2 patched{};
             SolveStatus ps = patcher.patch_child_to_parent(event.time, cur_cb, event.state,
