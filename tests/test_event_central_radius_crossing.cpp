@@ -93,6 +93,28 @@ TEST_CASE("PreviewChain_FreeReturnImpactDoesNotDependOnEndTime",
     }
 }
 
+TEST_CASE("PreviewChain_MoonEntryDoesNotImmediatelyExitOnInwardBoundaryCrossing",
+          "[phase4][trajectory][central_radius]") {
+    BodySystem sys = earth_moon_system();
+    TrajectoryBuilder builder(sys, preview_tolerances());
+
+    for (double vx0 : {0.13, 0.132}) {
+        PreviewRequest req;
+        req.central_body = kEarth;
+        req.start_time = 0.0;
+        req.initial_state = State2{{6678.0, 0.0}, {vx0, 10.85}};
+        req.end_time = 7.0 * kDay;
+        req.max_segments = 8;
+
+        Trajectory out;
+        REQUIRE(builder.build_preview(req, out) == SolveStatus::Ok);
+        REQUIRE(out.segments.size() == 2);
+        REQUIRE(out.segments[0].end_reason == EventType::SoiEntry);
+        REQUIRE(out.segments[1].central_body == kMoon);
+        REQUIRE(out.segments[1].end_reason == EventType::Impact);
+    }
+}
+
 TEST_CASE("EventDetector_CentralImpactCrossingIsStableAcrossHorizons",
           "[phase4][event][central_radius]") {
     BodySystem sys = root_only(398600.4418, 6378.137, 925000.0);

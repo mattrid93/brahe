@@ -64,10 +64,20 @@ struct RadiusCrossing {
     double dt = 0.0;
 };
 
+enum class RadiusCrossingDirection {
+    Inward,
+    Outward,
+};
+
 void consider_radius_candidate(const ConicElements2D& el, double target_true_anomaly,
-                               double horizon, double time_eps, RadiusCrossing& best) {
+                               RadiusCrossingDirection direction, double horizon,
+                               double time_eps, RadiusCrossing& best) {
     const double e = el.eccentricity;
     const double sign_h = (el.angular_momentum_z >= 0.0) ? 1.0 : -1.0;
+    const double radial_trend = sign_h * std::sin(target_true_anomaly);
+    if (direction == RadiusCrossingDirection::Inward && radial_trend >= 0.0) return;
+    if (direction == RadiusCrossingDirection::Outward && radial_trend <= 0.0) return;
+
     double dt = std::numeric_limits<double>::infinity();
 
     if (el.type == ConicType::Ellipse) {
@@ -107,8 +117,9 @@ void consider_radius_candidate(const ConicElements2D& el, double target_true_ano
 }
 
 RadiusCrossing first_central_radius_crossing(double mu, const State2& initial,
-                                             double radius, double horizon,
-                                             double time_eps) {
+                                             double radius,
+                                             RadiusCrossingDirection direction,
+                                             double horizon, double time_eps) {
     RadiusCrossing best;
     if (mu <= 0.0 || radius <= 0.0 || horizon <= time_eps ||
         !std::isfinite(mu) || !std::isfinite(radius)) {
@@ -126,9 +137,9 @@ RadiusCrossing first_central_radius_crossing(double mu, const State2& initial,
     if (cos_nu < -1.0 - 1e-12 || cos_nu > 1.0 + 1e-12) return best;
 
     const double nu_abs = detail::safe_acos(cos_nu);
-    consider_radius_candidate(el, nu_abs, horizon, time_eps, best);
+    consider_radius_candidate(el, nu_abs, direction, horizon, time_eps, best);
     if (nu_abs > 0.0 && nu_abs < M_PI) {
-        consider_radius_candidate(el, -nu_abs, horizon, time_eps, best);
+        consider_radius_candidate(el, -nu_abs, direction, horizon, time_eps, best);
     }
     return best;
 }
@@ -295,7 +306,8 @@ SolveStatus EventDetector::find_next_event(const EventSearchRequest& req,
     // before falling back to the coarse scan used for moving child SOIs.
     {
         RadiusCrossing crossing =
-            first_central_radius_crossing(mu, req.initial_state, body_radius, horizon,
+            first_central_radius_crossing(mu, req.initial_state, body_radius,
+                                          RadiusCrossingDirection::Inward, horizon,
                                           time_eps);
         if (crossing.found) {
             State2 s_event;
@@ -312,7 +324,8 @@ SolveStatus EventDetector::find_next_event(const EventSearchRequest& req,
     }
     {
         RadiusCrossing crossing =
-            first_central_radius_crossing(mu, req.initial_state, soi_radius, horizon,
+            first_central_radius_crossing(mu, req.initial_state, soi_radius,
+                                          RadiusCrossingDirection::Outward, horizon,
                                           time_eps);
         if (crossing.found) {
             State2 s_event;
