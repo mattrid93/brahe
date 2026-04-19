@@ -129,6 +129,11 @@ struct RadiusCrossing {
     double dt = 0.0;
 };
 
+struct RadialRange {
+    double min_radius = 0.0;
+    double max_radius = std::numeric_limits<double>::infinity();
+};
+
 enum class RadiusCrossingDirection {
     Inward,
     Outward,
@@ -209,18 +214,14 @@ RadiusCrossing first_central_radius_crossing(double mu, const State2& initial,
     return best;
 }
 
-bool child_soi_radially_reachable(double mu, const State2& initial,
-                                  const CachedChild* children, size_t child_count,
-                                  double root_eps) {
-    if (child_count == 0) return true;
-
+bool conic_radial_range(double mu, const State2& initial, RadialRange& out) {
     ConicElements2D el;
     if (TwoBody::to_elements(mu, initial, el) != SolveStatus::Ok) {
-        return true;
+        return false;
     }
     if (el.semi_latus_rectum <= 0.0 || !std::isfinite(el.semi_latus_rectum) ||
         el.eccentricity < 0.0 || !std::isfinite(el.eccentricity)) {
-        return true;
+        return false;
     }
 
     const double e = el.eccentricity;
@@ -228,20 +229,22 @@ bool child_soi_radially_reachable(double mu, const State2& initial,
     double r_max = std::numeric_limits<double>::infinity();
     if (el.type == ConicType::Ellipse && e < 1.0) {
         const double denom = 1.0 - e;
-        if (denom <= 0.0) return true;
+        if (denom <= 0.0) return false;
         r_max = el.semi_latus_rectum / denom;
     }
-    if (!std::isfinite(r_min) || r_min < 0.0) return true;
+    if (!std::isfinite(r_min) || r_min < 0.0) return false;
 
-    for (size_t i = 0; i < child_count; ++i) {
-        const CachedChild& child = children[i];
-        const double child_inner = std::max(0.0, child.orbit_radius - child.soi_radius);
-        const double child_outer = child.orbit_radius + child.soi_radius;
-        const bool overlaps =
-            r_max + root_eps >= child_inner && r_min - root_eps <= child_outer;
-        if (overlaps) return true;
-    }
-    return false;
+    out.min_radius = r_min;
+    out.max_radius = r_max;
+    return true;
+}
+
+bool child_soi_radially_overlaps(const RadialRange& range, const CachedChild& child,
+                                 double root_eps) {
+    const double child_inner = std::max(0.0, child.orbit_radius - child.soi_radius);
+    const double child_outer = child.orbit_radius + child.soi_radius;
+    return range.max_radius + root_eps >= child_inner &&
+           range.min_radius - root_eps <= child_outer;
 }
 
 }  // namespace
@@ -304,6 +307,19 @@ SolveStatus EventDetector::find_next_event(const EventSearchRequest& req,
         children[child_count++] =
             CachedChild{ch->id, ch->soi_radius, ch->orbit_radius,
                         ch->angular_rate, ch->phase_at_epoch};
+    }
+
+    bool children_radially_culled = false;
+    RadialRange radial_range;
+    if (child_count > 0 && conic_radial_range(mu, req.initial_state, radial_range)) {
+        size_t active_count = 0;
+        for (size_t i = 0; i < child_count; ++i) {
+            if (child_soi_radially_overlaps(radial_range, children[i], root_eps)) {
+                children[active_count++] = children[i];
+            }
+        }
+        children_radially_culled = active_count == 0;
+        child_count = active_count;
     }
 
     auto set_time_limit_output = [&]() {
@@ -442,8 +458,7 @@ SolveStatus EventDetector::find_next_event(const EventSearchRequest& req,
         }
     }
 
-    if (!child_soi_radially_reachable(mu, req.initial_state, children, child_count,
-                                      root_eps)) {
+    if (children_radially_culled) {
         if (have_best) out = best;
         else set_time_limit_output();
         return SolveStatus::Ok;
