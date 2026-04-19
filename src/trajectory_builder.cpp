@@ -47,30 +47,57 @@ bool event_matches_suppressed_boundary(const PredictedEvent& event, BodyId centr
     return false;
 }
 
+double distance_from_suppressed_boundary(const State2& state, double time,
+                                         const BodySystem& bodies, BodyId central_body,
+                                         const SuppressionState& s) {
+    if (s.suppressed_event_type == EventType::SoiExit) {
+        (void)bodies;
+        (void)central_body;
+        return std::abs(length(state.r) - s.boundary_radius);
+    }
+
+    Vec2 r_child = bodies.position_in_parent(s.suppressed_body, time);
+    Vec2 d = state.r - r_child;
+    return std::abs(length(d) - s.boundary_radius);
+}
+
+double speed_relative_to_suppressed_boundary(const State2& state, double time,
+                                             const BodySystem& bodies,
+                                             BodyId central_body,
+                                             const SuppressionState& s) {
+    if (s.suppressed_event_type == EventType::SoiExit) {
+        (void)bodies;
+        (void)central_body;
+        return length(state.v);
+    }
+
+    Vec2 v_child = bodies.velocity_in_parent(s.suppressed_body, time);
+    return length(state.v - v_child);
+}
+
 // Suppression is no longer in effect if EITHER the time or distance criterion
 // has been met (PHASE_4_PLAN 6.7).
-bool suppression_has_expired(const PredictedEvent& event, const BodySystem& bodies,
+bool suppression_has_expired(const EventSearchRequest& request,
+                             const PredictedEvent& event, const BodySystem& bodies,
                              BodyId central_body, const SuppressionState& s,
                              const Tolerances& tol) {
+    // After a child->parent exit, do not accept re-entry into the same child
+    // until the parent-frame search state has moved meaningfully outside the
+    // boundary. Time alone is not enough here: otherwise a 2*time_epsilon retry
+    // can turn patch noise into an exit/re-entry chatter pair.
+    if (s.suppressed_event_type == EventType::SoiEntry) {
+        double start_distance = distance_from_suppressed_boundary(
+            request.initial_state, request.start_time, bodies, central_body, s);
+        if (start_distance < 10.0 * tol.position_epsilon) return false;
+    }
+
     // Time criterion.
     double dt = event.time - s.patch_time;
     if (dt >= tol.time_epsilon) return true;
 
     // Distance criterion: |distance to suppressed boundary| >= 10 * pos_eps.
-    double dist_from_boundary = 0.0;
-    if (s.suppressed_event_type == EventType::SoiExit) {
-        // Currently inside child frame; suppressed body IS the central body.
-        // distance-from-boundary = |r_sc| - soi.
-        double r = length(event.state.r);
-        dist_from_boundary = std::abs(r - s.boundary_radius);
-    } else {
-        // Currently in parent frame; suppressed body is a child of central_body.
-        Vec2 r_child = bodies.position_in_parent(s.suppressed_body, event.time);
-        Vec2 d = event.state.r - r_child;
-        double dist = length(d);
-        dist_from_boundary = std::abs(dist - s.boundary_radius);
-        (void)central_body;
-    }
+    double dist_from_boundary = distance_from_suppressed_boundary(
+        event.state, event.time, bodies, central_body, s);
     if (dist_from_boundary >= 10.0 * tol.position_epsilon) return true;
 
     return false;
@@ -94,13 +121,21 @@ SolveStatus find_next_event_respecting_suppression(
                                                suppression)) {
             return SolveStatus::Ok;
         }
-        if (suppression_has_expired(out_event, bodies, request.central_body, suppression,
-                                    tol)) {
+        if (suppression_has_expired(request, out_event, bodies, request.central_body,
+                                    suppression, tol)) {
             return SolveStatus::Ok;
         }
 
         // Event is suppressed -- advance the search past the suppression window.
-        double new_start = suppression.patch_time + 2.0 * tol.time_epsilon;
+        double rel_speed = speed_relative_to_suppressed_boundary(
+            request.initial_state, request.start_time, bodies, request.central_body,
+            suppression);
+        double distance_advance =
+            20.0 * tol.position_epsilon / std::max(rel_speed, tol.velocity_epsilon);
+        double new_start =
+            request.start_time + std::max(2.0 * tol.time_epsilon, distance_advance);
+        double min_start = suppression.patch_time + 2.0 * tol.time_epsilon;
+        if (new_start < min_start) new_start = min_start;
         if (new_start >= request.time_limit) {
             // Suppression window extends past the horizon -- synthesize a
             // TimeLimit event at the horizon end. Use a best-effort propagated
