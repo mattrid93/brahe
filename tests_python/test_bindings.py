@@ -54,7 +54,7 @@ class BindingsTests(unittest.TestCase):
         req.start_time = 0.0
         req.time_limit = 1.0
         req.initial_state = brahe.State2(
-            brahe.Vec2(10.0, 0.0), brahe.Vec2(0.0, 10.0)
+            brahe.Vec2(0.0, 19.0), brahe.Vec2(-7.25, 0.0)
         )
 
         detector = brahe.EventDetector(system)

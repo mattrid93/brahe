@@ -144,6 +144,41 @@ RadiusCrossing first_central_radius_crossing(double mu, const State2& initial,
     return best;
 }
 
+bool child_soi_radially_reachable(double mu, const State2& initial,
+                                  const CachedChild* children, size_t child_count,
+                                  double root_eps) {
+    if (child_count == 0) return true;
+
+    ConicElements2D el;
+    if (TwoBody::to_elements(mu, initial, el) != SolveStatus::Ok) {
+        return true;
+    }
+    if (el.semi_latus_rectum <= 0.0 || !std::isfinite(el.semi_latus_rectum) ||
+        el.eccentricity < 0.0 || !std::isfinite(el.eccentricity)) {
+        return true;
+    }
+
+    const double e = el.eccentricity;
+    const double r_min = el.semi_latus_rectum / (1.0 + e);
+    double r_max = std::numeric_limits<double>::infinity();
+    if (el.type == ConicType::Ellipse && e < 1.0) {
+        const double denom = 1.0 - e;
+        if (denom <= 0.0) return true;
+        r_max = el.semi_latus_rectum / denom;
+    }
+    if (!std::isfinite(r_min) || r_min < 0.0) return true;
+
+    for (size_t i = 0; i < child_count; ++i) {
+        const CachedChild& child = children[i];
+        const double child_inner = std::max(0.0, child.orbit_radius - child.soi_radius);
+        const double child_outer = child.orbit_radius + child.soi_radius;
+        const bool overlaps =
+            r_max + root_eps >= child_inner && r_min - root_eps <= child_outer;
+        if (overlaps) return true;
+    }
+    return false;
+}
+
 }  // namespace
 
 EventDetector::EventDetector(const BodySystem& bodies, const Tolerances& tolerances,
@@ -339,6 +374,13 @@ SolveStatus EventDetector::find_next_event(const EventSearchRequest& req,
             ev.state = s_event;
             consider(ev);
         }
+    }
+
+    if (!child_soi_radially_reachable(mu, req.initial_state, children, child_count,
+                                      root_eps)) {
+        if (have_best) out = best;
+        else set_time_limit_output();
+        return SolveStatus::Ok;
     }
 
     // --- Step 5: coarse scan step size ---
