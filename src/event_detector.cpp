@@ -750,11 +750,19 @@ SolveStatus EventDetector::find_next_event(const EventSearchRequest& req,
                 ev.state = s_root;
                 consider(ev);
             } else if (f_ch_lo > 0.0 && f_ch_hi > 0.0) {
-                double t_mid = 0.5 * (t_lo + t_hi);
-                double f_mid = f_of_t(t_mid);
+                const double half_window_motion = 0.5 * v_rel_max * (t_hi - t_lo);
                 double proximity =
                     std::max({root_eps * 10.0, child.soi_radius * 0.05,
-                              0.5 * v_rel_max * dt_scan});
+                              half_window_motion});
+                bool too_far_for_midpoint =
+                    std::min(f_ch_lo, f_ch_hi) > proximity + half_window_motion;
+                if (too_far_for_midpoint) {
+                    // The distance function cannot plausibly dip close enough
+                    // to the child SOI within this window to warrant a midpoint
+                    // propagation.
+                } else {
+                double t_mid = 0.5 * (t_lo + t_hi);
+                double f_mid = f_of_t(t_mid);
                 bool possible_minimum = f_mid <= f_ch_lo && f_mid <= f_ch_hi;
                 bool near_boundary = f_mid <= proximity;
                 if (!(possible_minimum && near_boundary)) {
@@ -791,6 +799,7 @@ SolveStatus EventDetector::find_next_event(const EventSearchRequest& req,
                     ev.to_body = child.id;
                     ev.state = s_event;
                     consider(ev);
+                }
                 }
                 }
             }
