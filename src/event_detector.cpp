@@ -463,6 +463,10 @@ SolveStatus EventDetector::find_next_event(const EventSearchRequest& req,
         else set_time_limit_output();
         return SolveStatus::Ok;
     }
+    if (child_count == 0 && parent_id != InvalidBody && have_best) {
+        out = best;
+        return SolveStatus::Ok;
+    }
 
     // --- Step 5: coarse scan step size ---
     // Adaptive step bounded by smallest child SOI / max relative speed, plus safety caps.
