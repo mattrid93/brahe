@@ -38,15 +38,80 @@ void init_output(PredictedEvent& out, double fallback_time) {
     out.state = State2{{0.0, 0.0}, {0.0, 0.0}};
 }
 
-// Propagate the initial state forward by dt. dt == 0 returns the initial state
-// unchanged (avoids unnecessary propagator calls at start-time boundary checks).
-SolveStatus propagate_by(double mu, const State2& initial, double dt, State2& out) {
-    if (dt == 0.0) {
-        out = initial;
-        return SolveStatus::Ok;
+class CachedConicPropagator {
+public:
+    CachedConicPropagator(double mu, const State2& initial)
+        : mu_(mu), initial_(initial) {
+        const double r_mag = length(initial.r);
+        const double v_mag = length(initial.v);
+        const double h = TwoBody::specific_angular_momentum_z(initial);
+        const double h_threshold = 1e-12 * std::max(1.0, r_mag * v_mag);
+        if (std::abs(h) <= h_threshold) {
+            return;
+        }
+
+        SolveStatus status = TwoBody::to_elements(mu, initial, elements_);
+        use_cached_ = status == SolveStatus::Ok &&
+                      elements_.semi_latus_rectum > 0.0 &&
+                      std::isfinite(elements_.semi_latus_rectum) &&
+                      std::isfinite(elements_.eccentricity) &&
+                      std::isfinite(elements_.angular_momentum_z);
     }
-    return TwoBody::propagate(mu, initial, dt, out);
-}
+
+    SolveStatus propagate(double dt, State2& out) const {
+        if (dt == 0.0) {
+            out = initial_;
+            return SolveStatus::Ok;
+        }
+        if (!use_cached_) {
+            return TwoBody::propagate(mu_, initial_, dt, out);
+        }
+
+        ConicElements2D el = elements_;
+        const double e = el.eccentricity;
+        const double p = el.semi_latus_rectum;
+        const double sign_h = (el.angular_momentum_z >= 0.0) ? 1.0 : -1.0;
+        double nu_new = 0.0;
+
+        if (el.type == ConicType::Ellipse) {
+            const double a = el.semi_major_axis;
+            if (a <= 0.0 || !std::isfinite(a)) return SolveStatus::NumericalFailure;
+            const double n = std::sqrt(mu_ / (a * a * a));
+            const double M_new = el.mean_anomaly + sign_h * n * dt;
+
+            double E_new = 0.0;
+            SolveStatus ks = detail::mean_to_eccentric_anomaly(M_new, e, E_new);
+            if (ks != SolveStatus::Ok) return ks;
+            nu_new = detail::eccentric_to_true_anomaly(E_new, e);
+        } else if (el.type == ConicType::Hyperbola) {
+            const double a = el.semi_major_axis;
+            if (a >= 0.0 || !std::isfinite(a)) return SolveStatus::NumericalFailure;
+            const double n = std::sqrt(mu_ / (-a * a * a));
+            const double M_new = el.mean_anomaly + sign_h * n * dt;
+
+            double H_new = 0.0;
+            SolveStatus ks = detail::mean_to_hyperbolic_anomaly(M_new, e, H_new);
+            if (ks != SolveStatus::Ok) return ks;
+            nu_new = detail::hyperbolic_to_true_anomaly(H_new, e);
+        } else {
+            if (p <= 0.0 || !std::isfinite(p)) return SolveStatus::NumericalFailure;
+            const double D0 = std::tan(el.true_anomaly / 2.0);
+            const double coeff = std::sqrt(2.0 * mu_ / (p * p * p));
+            const double W = D0 + D0 * D0 * D0 / 3.0 + sign_h * coeff * dt;
+            const double D1 = 2.0 * std::sinh(std::asinh(1.5 * W) / 3.0);
+            nu_new = 2.0 * std::atan(D1);
+        }
+
+        el.true_anomaly = nu_new;
+        return TwoBody::from_elements(el, out);
+    }
+
+private:
+    double mu_ = 0.0;
+    State2 initial_{};
+    ConicElements2D elements_{};
+    bool use_cached_ = false;
+};
 
 Vec2 child_position(const CachedChild& child, double t) {
     double theta = child.phase_at_epoch + child.angular_rate * t;
@@ -221,6 +286,7 @@ SolveStatus EventDetector::find_next_event(const EventSearchRequest& req,
     const double time_eps = tolerances_.time_epsilon;
     const int max_iter = tolerances_.max_event_refine_iterations;
     const double horizon = req.time_limit - req.start_time;
+    const CachedConicPropagator propagator(mu, req.initial_state);
 
     // Children of the central body (in canonical BodyId order).
     const BodyId* child_begin = bodies_.children_begin(req.central_body);
@@ -242,7 +308,7 @@ SolveStatus EventDetector::find_next_event(const EventSearchRequest& req,
 
     auto set_time_limit_output = [&]() {
         State2 at_end;
-        SolveStatus ps = propagate_by(mu, req.initial_state, horizon, at_end);
+        SolveStatus ps = propagator.propagate(horizon, at_end);
         out.type = EventType::TimeLimit;
         out.time = req.time_limit;
         out.from_body = req.central_body;
@@ -346,7 +412,7 @@ SolveStatus EventDetector::find_next_event(const EventSearchRequest& req,
                                           time_eps);
         if (crossing.found) {
             State2 s_event;
-            SolveStatus ps = propagate_by(mu, req.initial_state, crossing.dt, s_event);
+            SolveStatus ps = propagator.propagate(crossing.dt, s_event);
             if (ps != SolveStatus::Ok) return ps;
             PredictedEvent ev;
             ev.type = EventType::Impact;
@@ -364,7 +430,7 @@ SolveStatus EventDetector::find_next_event(const EventSearchRequest& req,
                                           time_eps);
         if (crossing.found) {
             State2 s_event;
-            SolveStatus ps = propagate_by(mu, req.initial_state, crossing.dt, s_event);
+            SolveStatus ps = propagator.propagate(crossing.dt, s_event);
             if (ps != SolveStatus::Ok) return ps;
             PredictedEvent ev;
             ev.type = EventType::SoiExit;
@@ -423,7 +489,7 @@ SolveStatus EventDetector::find_next_event(const EventSearchRequest& req,
         if (diagnostics_ != nullptr) ++diagnostics_->scan_steps;
         double t_hi = std::min(t_lo + dt_scan, req.time_limit);
         State2 s_hi;
-        SolveStatus ps = propagate_by(mu, req.initial_state, t_hi - req.start_time, s_hi);
+        SolveStatus ps = propagator.propagate(t_hi - req.start_time, s_hi);
         if (ps != SolveStatus::Ok || !is_finite_state(s_hi)) {
             // Propagator failed mid-scan. The only failure mode after validation is
             // the radial singularity at r=0 -- the spacecraft falls into the central
@@ -436,8 +502,7 @@ SolveStatus EventDetector::find_next_event(const EventSearchRequest& req,
                 if (t_valid_hi - t_valid_lo <= time_eps) break;
                 double t_m = 0.5 * (t_valid_lo + t_valid_hi);
                 State2 s_m;
-                SolveStatus ms =
-                    propagate_by(mu, req.initial_state, t_m - req.start_time, s_m);
+                SolveStatus ms = propagator.propagate(t_m - req.start_time, s_m);
                 if (ms == SolveStatus::Ok && is_finite_state(s_m)) {
                     t_valid_lo = t_m;
                     s_last = s_m;
@@ -449,7 +514,7 @@ SolveStatus EventDetector::find_next_event(const EventSearchRequest& req,
             if (f_imp_lo > 0.0 && f_imp_end <= 0.0) {
                 auto f_of_t = [&](double t) {
                     State2 s;
-                    (void)propagate_by(mu, req.initial_state, t - req.start_time, s);
+                    (void)propagator.propagate(t - req.start_time, s);
                     return eval_impact(s);
                 };
                 double t_root = t_lo;
@@ -460,8 +525,7 @@ SolveStatus EventDetector::find_next_event(const EventSearchRequest& req,
                 if (rs != SolveStatus::Ok) return rs;
 
                 State2 s_root;
-                (void)propagate_by(mu, req.initial_state, t_root - req.start_time,
-                                   s_root);
+                (void)propagator.propagate(t_root - req.start_time, s_root);
                 PredictedEvent ev;
                 ev.type = EventType::Impact;
                 ev.time = t_root;
@@ -479,7 +543,7 @@ SolveStatus EventDetector::find_next_event(const EventSearchRequest& req,
         double f_imp_hi = eval_impact(s_hi);
         auto f_impact_of_t = [&](double t) {
             State2 s;
-            (void)propagate_by(mu, req.initial_state, t - req.start_time, s);
+            (void)propagator.propagate(t - req.start_time, s);
             return eval_impact(s);
         };
         if (f_imp_lo > 0.0 && f_imp_hi <= 0.0) {
@@ -491,7 +555,7 @@ SolveStatus EventDetector::find_next_event(const EventSearchRequest& req,
             if (rs != SolveStatus::Ok) return rs;
 
             State2 s_root;
-            (void)propagate_by(mu, req.initial_state, t_root - req.start_time, s_root);
+            (void)propagator.propagate(t_root - req.start_time, s_root);
             PredictedEvent ev;
             ev.type = EventType::Impact;
             ev.time = t_root;
@@ -538,8 +602,7 @@ SolveStatus EventDetector::find_next_event(const EventSearchRequest& req,
                 }
 
                 State2 s_event;
-                (void)propagate_by(mu, req.initial_state, t_event - req.start_time,
-                                   s_event);
+                (void)propagator.propagate(t_event - req.start_time, s_event);
                 PredictedEvent ev;
                 ev.type = EventType::Impact;
                 ev.time = t_event;
@@ -555,7 +618,7 @@ SolveStatus EventDetector::find_next_event(const EventSearchRequest& req,
         double f_exit_hi = eval_exit(s_hi);
         auto f_exit_of_t = [&](double t) {
             State2 s;
-            (void)propagate_by(mu, req.initial_state, t - req.start_time, s);
+            (void)propagator.propagate(t - req.start_time, s);
             return eval_exit(s);
         };
         if (f_exit_lo < 0.0 && f_exit_hi >= 0.0) {
@@ -567,7 +630,7 @@ SolveStatus EventDetector::find_next_event(const EventSearchRequest& req,
             if (rs != SolveStatus::Ok) return rs;
 
             State2 s_root;
-            (void)propagate_by(mu, req.initial_state, t_root - req.start_time, s_root);
+            (void)propagator.propagate(t_root - req.start_time, s_root);
             PredictedEvent ev;
             ev.type = EventType::SoiExit;
             ev.time = t_root;
@@ -614,8 +677,7 @@ SolveStatus EventDetector::find_next_event(const EventSearchRequest& req,
                 }
 
                 State2 s_event;
-                (void)propagate_by(mu, req.initial_state, t_event - req.start_time,
-                                   s_event);
+                (void)propagator.propagate(t_event - req.start_time, s_event);
                 PredictedEvent ev;
                 ev.type = EventType::SoiExit;
                 ev.time = t_event;
@@ -634,7 +696,7 @@ SolveStatus EventDetector::find_next_event(const EventSearchRequest& req,
             double f_ch_hi = eval_child(s_hi, ci, t_hi);
             auto f_of_t = [&, ci](double t) {
                 State2 s;
-                (void)propagate_by(mu, req.initial_state, t - req.start_time, s);
+                (void)propagator.propagate(t - req.start_time, s);
                 return eval_child(s, ci, t);
             };
             if (f_ch_lo > 0.0 && f_ch_hi <= 0.0) {
@@ -645,7 +707,7 @@ SolveStatus EventDetector::find_next_event(const EventSearchRequest& req,
                 if (rs != SolveStatus::Ok) return rs;
 
                 State2 s_root;
-                (void)propagate_by(mu, req.initial_state, t_root - req.start_time, s_root);
+                (void)propagator.propagate(t_root - req.start_time, s_root);
                 PredictedEvent ev;
                 ev.type = EventType::SoiEntry;
                 ev.time = t_root;
@@ -687,8 +749,7 @@ SolveStatus EventDetector::find_next_event(const EventSearchRequest& req,
                         }
                     }
                     State2 s_event;
-                    (void)propagate_by(mu, req.initial_state, t_event - req.start_time,
-                                       s_event);
+                    (void)propagator.propagate(t_event - req.start_time, s_event);
                     PredictedEvent ev;
                     ev.type = EventType::SoiEntry;
                     ev.time = t_event;
