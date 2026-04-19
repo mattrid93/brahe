@@ -310,8 +310,12 @@ SolveStatus EventDetector::find_next_event(const EventSearchRequest& req,
     }
 
     bool children_radially_culled = false;
+    bool have_radial_range = false;
     RadialRange radial_range;
-    if (child_count > 0 && conic_radial_range(mu, req.initial_state, radial_range)) {
+    if (conic_radial_range(mu, req.initial_state, radial_range)) {
+        have_radial_range = true;
+    }
+    if (child_count > 0 && have_radial_range) {
         size_t active_count = 0;
         for (size_t i = 0; i < child_count; ++i) {
             if (child_soi_radially_overlaps(radial_range, children[i], root_eps)) {
@@ -468,6 +472,11 @@ SolveStatus EventDetector::find_next_event(const EventSearchRequest& req,
         return SolveStatus::Ok;
     }
 
+    const bool scan_impact =
+        !have_radial_range || radial_range.min_radius <= body_radius + root_eps;
+    const bool scan_exit =
+        !have_radial_range || radial_range.max_radius >= soi_radius - root_eps;
+
     // --- Step 5: coarse scan step size ---
     // Adaptive step bounded by smallest child SOI / max relative speed, plus safety caps.
     double v_sc = length(req.initial_state.v);
@@ -492,8 +501,8 @@ SolveStatus EventDetector::find_next_event(const EventSearchRequest& req,
     // --- Step 6: coarse scan loop ---
     double t_lo = req.start_time;
     State2 s_lo = req.initial_state;
-    double f_imp_lo = eval_impact(s_lo);
-    double f_exit_lo = eval_exit(s_lo);
+    double f_imp_lo = scan_impact ? eval_impact(s_lo) : 0.0;
+    double f_exit_lo = scan_exit ? eval_exit(s_lo) : 0.0;
     double f_child_lo[kMaxChildrenPerBody];
     for (size_t i = 0; i < child_count; ++i) {
         f_child_lo[i] = eval_child(s_lo, i, t_lo);
@@ -558,14 +567,16 @@ SolveStatus EventDetector::find_next_event(const EventSearchRequest& req,
             return SolveStatus::Ok;
         }
 
-        // --- Impact bracket ---
-        double f_imp_hi = eval_impact(s_hi);
-        auto f_impact_of_t = [&](double t) {
-            State2 s;
-            (void)propagator.propagate(t - req.start_time, s);
-            return eval_impact(s);
-        };
-        if (f_imp_lo > 0.0 && f_imp_hi <= 0.0) {
+        double f_imp_hi = f_imp_lo;
+        if (scan_impact) {
+            // --- Impact bracket ---
+            f_imp_hi = eval_impact(s_hi);
+            auto f_impact_of_t = [&](double t) {
+                State2 s;
+                (void)propagator.propagate(t - req.start_time, s);
+                return eval_impact(s);
+            };
+            if (f_imp_lo > 0.0 && f_imp_hi <= 0.0) {
             double t_root = t_lo;
             if (diagnostics_ != nullptr) ++diagnostics_->root_refinements;
             SolveStatus rs = detail::refine_root_bisection(
@@ -632,15 +643,18 @@ SolveStatus EventDetector::find_next_event(const EventSearchRequest& req,
             }
             }
         }
+        }
 
-        // --- SOI exit bracket ---
-        double f_exit_hi = eval_exit(s_hi);
-        auto f_exit_of_t = [&](double t) {
-            State2 s;
-            (void)propagator.propagate(t - req.start_time, s);
-            return eval_exit(s);
-        };
-        if (f_exit_lo < 0.0 && f_exit_hi >= 0.0) {
+        double f_exit_hi = f_exit_lo;
+        if (scan_exit) {
+            // --- SOI exit bracket ---
+            f_exit_hi = eval_exit(s_hi);
+            auto f_exit_of_t = [&](double t) {
+                State2 s;
+                (void)propagator.propagate(t - req.start_time, s);
+                return eval_exit(s);
+            };
+            if (f_exit_lo < 0.0 && f_exit_hi >= 0.0) {
             double t_root = t_lo;
             if (diagnostics_ != nullptr) ++diagnostics_->root_refinements;
             SolveStatus rs = detail::refine_root_bisection(
@@ -706,6 +720,7 @@ SolveStatus EventDetector::find_next_event(const EventSearchRequest& req,
                 consider(ev);
             }
             }
+        }
         }
 
         // --- Child entry brackets ---
