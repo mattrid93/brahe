@@ -7,6 +7,16 @@ from pathlib import Path
 import brahe
 
 
+STRESS_CHATTER_CASES = (
+    # Repeated moon 4 boundary chatter around days 134, 143, 171, and 180.
+    (1_485_539.551758, 2.876249082, 3.839552419),
+    # Repeated moon 1/2 chatter around days 45, 85, 88, 100, 193, and 222.
+    (132_275.300459, 0.459887814, 40.208643533),
+    # Moon 2 chatter around days 247 and 288.
+    (489_370.985556, 4.471051375, 10.973973042),
+)
+
+
 def load_stress_viewer():
     path = Path(__file__).resolve().parents[1] / "examples" / "stress_viewer.py"
     spec = importlib.util.spec_from_file_location("stress_viewer", path)
@@ -128,6 +138,36 @@ def test_stress_preview_sampling_clusters_near_elliptic_periapsis():
 
     assert len(times) >= viewer.PERIAPSIS_SAMPLES_PER_REVOLUTION
     assert min(deltas[:10]) < max(deltas) * 0.25
+
+
+def find_same_boundary_chatter(trajectory, max_duration=1.0):
+    chatter = []
+    segments = trajectory.segments
+    for i in range(len(segments) - 2):
+        exited = segments[i]
+        parent = segments[i + 1]
+        reentered = segments[i + 2]
+        parent_duration = parent.end_time - parent.start_time
+        if (
+            exited.end_reason == brahe.EventType.SoiExit
+            and parent.end_reason == brahe.EventType.SoiEntry
+            and parent_duration < max_duration
+            and reentered.central_body == exited.central_body
+        ):
+            chatter.append((i, exited.central_body, parent_duration))
+    return chatter
+
+
+def test_stress_cases_do_not_reenter_same_soi_immediately_after_exit():
+    viewer = load_stress_viewer()
+    system = viewer.make_stress_system()
+
+    for radius, theta, speed in STRESS_CHATTER_CASES:
+        req = viewer.build_request(radius, theta, speed, 300.0, 80)
+        status, trajectory = viewer.build_trajectory(system, req)
+
+        assert status == brahe.SolveStatus.Ok
+        assert find_same_boundary_chatter(trajectory) == []
 
 
 def test_stress_preview_sampling_clusters_near_hyperbolic_periapsis():
