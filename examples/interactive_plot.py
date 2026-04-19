@@ -310,8 +310,9 @@ def open_interactive_plot(args):
 
     def setup_animation_overlay(system, trajectory):
         clear_animation_artists()
-        samples = brahe.sample_trajectory(
-            trajectory, system, samples_per_segment=sample_count, frame="root"
+        frame_count = sample_count * max(1, len(trajectory.segments))
+        samples = brahe.sample_trajectory_uniform(
+            trajectory, system, samples=frame_count, frame="root"
         )
         animation["system"] = system
         animation["samples"] = samples

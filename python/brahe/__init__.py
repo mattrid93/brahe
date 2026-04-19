@@ -1,7 +1,7 @@
 from ._brahe import *
 
 try:
-    from .sampling import sample_segment, sample_trajectory
+    from .sampling import sample_segment, sample_trajectory, sample_trajectory_uniform
 except ImportError:
     pass
 

@@ -105,6 +105,35 @@ class BindingsTests(unittest.TestCase):
         self.assertEqual(len(samples["x"]), 5)
         self.assertEqual(samples["segment_index"], [0, 0, 0, 0, 0])
 
+    def test_uniform_sampling_uses_even_times_across_segments(self):
+        system = make_body_system()
+        trajectory = brahe.Trajectory()
+
+        first = brahe.Segment()
+        first.central_body = 0
+        first.start_time = 0.0
+        first.end_time = 2.0
+        first.end_reason = brahe.EventType.SoiEntry
+        first.initial_state = brahe.State2(
+            brahe.Vec2(10.0, 0.0), brahe.Vec2(0.0, 10.0)
+        )
+
+        second = brahe.Segment()
+        second.central_body = 0
+        second.start_time = 2.0
+        second.end_time = 10.0
+        second.end_reason = brahe.EventType.TimeLimit
+        second.initial_state = brahe.State2(
+            brahe.Vec2(10.0, 0.0), brahe.Vec2(0.0, 10.0)
+        )
+
+        trajectory.segments = [first, second]
+
+        samples = brahe.sample_trajectory_uniform(trajectory, system, samples=6)
+
+        self.assertEqual(samples["t"], [0.0, 2.0, 4.0, 6.0, 8.0, 10.0])
+        self.assertEqual(samples["segment_index"], [0, 0, 1, 1, 1, 1])
+
 
 class PlottingTests(unittest.TestCase):
     @classmethod
