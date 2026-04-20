@@ -451,6 +451,320 @@ ScanConfig choose_scan_config(const EventSearchRequest& req, double horizon,
     return config;
 }
 
+SolveStatus scan_for_events(const EventSearchRequest& req, BodyId parent_id,
+                            double body_radius, double soi_radius,
+                            const CachedChild* children, size_t child_count,
+                            const CachedConicPropagator& propagator,
+                            const ScanConfig& scan, double root_eps,
+                            double time_eps, int max_iter,
+                            EventDetectorDiagnostics* diagnostics,
+                            CandidateSet& candidates) {
+    auto eval_impact = [&](const State2& s) { return length(s.r) - body_radius; };
+    auto eval_exit = [&](const State2& s) { return length(s.r) - soi_radius; };
+    auto eval_child = [&](const State2& s, size_t child_index, double abs_t) {
+        const CachedChild& child = children[child_index];
+        Vec2 rc = child_position(child, abs_t);
+        return length(s.r - rc) - child.soi_radius;
+    };
+
+    double t_lo = req.start_time;
+    State2 s_lo = req.initial_state;
+    double f_imp_lo = scan.scan_impact ? eval_impact(s_lo) : 0.0;
+    double f_exit_lo = scan.scan_exit ? eval_exit(s_lo) : 0.0;
+    double f_child_lo[kMaxChildrenPerBody];
+    for (size_t i = 0; i < child_count; ++i) {
+        f_child_lo[i] = eval_child(s_lo, i, t_lo);
+    }
+
+    // Hard cap on scan iterations prevents infinite loops from pathological inputs.
+    const int max_scan_steps = 200000;
+    int scan_steps = 0;
+
+    while (t_lo < req.time_limit && scan_steps < max_scan_steps) {
+        ++scan_steps;
+        if (diagnostics != nullptr) ++diagnostics->scan_steps;
+
+        double t_hi = std::min(t_lo + scan.dt, req.time_limit);
+        State2 s_hi;
+        SolveStatus ps = propagator.propagate(t_hi - req.start_time, s_hi);
+        if (ps != SolveStatus::Ok || !is_finite_state(s_hi)) {
+            // Propagator failed mid-scan. The only failure mode after validation is
+            // the radial singularity at r=0 -- the spacecraft falls into the central
+            // body during (t_lo, t_hi]. Binary-search for the last propagable time
+            // and, if an impact bracket exists there, refine it.
+            double t_valid_lo = t_lo;  // propagation works here
+            double t_valid_hi = t_hi;  // propagation fails here
+            State2 s_last = s_lo;
+            for (int k = 0; k < 64; ++k) {
+                if (t_valid_hi - t_valid_lo <= time_eps) break;
+                double t_m = 0.5 * (t_valid_lo + t_valid_hi);
+                State2 s_m;
+                SolveStatus ms = propagator.propagate(t_m - req.start_time, s_m);
+                if (ms == SolveStatus::Ok && is_finite_state(s_m)) {
+                    t_valid_lo = t_m;
+                    s_last = s_m;
+                } else {
+                    t_valid_hi = t_m;
+                }
+            }
+
+            double f_imp_end = eval_impact(s_last);
+            if (f_imp_lo > 0.0 && f_imp_end <= 0.0) {
+                auto f_of_t = [&](double t) {
+                    State2 s;
+                    (void)propagator.propagate(t - req.start_time, s);
+                    return eval_impact(s);
+                };
+                double t_root = t_lo;
+                if (diagnostics != nullptr) ++diagnostics->root_refinements;
+                SolveStatus rs = detail::refine_root_bisection(
+                    f_of_t, t_lo, t_valid_lo, f_imp_lo, f_imp_end, root_eps,
+                    max_iter, t_root);
+                if (rs != SolveStatus::Ok) return rs;
+
+                State2 s_root;
+                (void)propagator.propagate(t_root - req.start_time, s_root);
+                candidates.consider(make_event(EventType::Impact, t_root,
+                                               req.central_body, InvalidBody,
+                                               s_root),
+                                    time_eps);
+            }
+            return SolveStatus::Ok;
+        }
+
+        double f_imp_hi = f_imp_lo;
+        if (scan.scan_impact) {
+            f_imp_hi = eval_impact(s_hi);
+            auto f_impact_of_t = [&](double t) {
+                State2 s;
+                (void)propagator.propagate(t - req.start_time, s);
+                return eval_impact(s);
+            };
+
+            if (f_imp_lo > 0.0 && f_imp_hi <= 0.0) {
+                double t_root = t_lo;
+                if (diagnostics != nullptr) ++diagnostics->root_refinements;
+                SolveStatus rs = detail::refine_root_bisection(
+                    f_impact_of_t, t_lo, t_hi, f_imp_lo, f_imp_hi, root_eps,
+                    max_iter, t_root);
+                if (rs != SolveStatus::Ok) return rs;
+
+                State2 s_root;
+                (void)propagator.propagate(t_root - req.start_time, s_root);
+                candidates.consider(make_event(EventType::Impact, t_root,
+                                               req.central_body, InvalidBody,
+                                               s_root),
+                                    time_eps);
+            } else if (f_imp_lo > 0.0 && f_imp_hi > 0.0) {
+                double t_mid = 0.5 * (t_lo + t_hi);
+                double f_mid = f_impact_of_t(t_mid);
+                double proximity =
+                    std::max({root_eps * 10.0, body_radius,
+                              0.5 * scan.spacecraft_speed * scan.dt});
+                bool possible_minimum = f_mid <= f_imp_lo && f_mid <= f_imp_hi;
+                bool near_boundary = f_mid <= proximity;
+                if (possible_minimum && near_boundary) {
+                    double t_min = t_lo;
+                    double f_min = f_imp_lo;
+                    if (diagnostics != nullptr) ++diagnostics->impact_minimum_refinements;
+                    SolveStatus ms = detail::refine_minimum(
+                        f_impact_of_t, t_lo, t_hi, root_eps, max_iter, t_min, f_min);
+                    if (ms != SolveStatus::Ok && f_min > root_eps) {
+                        // The bounded minimum search did not converge, but the best
+                        // sampled value is still comfortably outside the boundary.
+                        // Continue scanning instead of treating a non-candidate window
+                        // as an event-refinement failure.
+                        f_imp_lo = f_imp_hi;
+                    } else if (ms != SolveStatus::Ok) {
+                        return ms;
+                    }
+
+                    if (ms == SolveStatus::Ok && f_min <= root_eps) {
+                        double t_event = t_min;
+                        if (f_min <= 0.0 && t_min > t_lo + time_eps) {
+                            double t_root = t_lo;
+                            if (diagnostics != nullptr) ++diagnostics->root_refinements;
+                            SolveStatus rs = detail::refine_root_bisection(
+                                f_impact_of_t, t_lo, t_min, f_imp_lo, f_min,
+                                root_eps, max_iter, t_root);
+                            if (rs != SolveStatus::Ok) return rs;
+                            t_event = t_root;
+                        }
+
+                        State2 s_event;
+                        (void)propagator.propagate(t_event - req.start_time, s_event);
+                        candidates.consider(make_event(EventType::Impact, t_event,
+                                                       req.central_body,
+                                                       InvalidBody, s_event),
+                                            time_eps);
+                    }
+                }
+            }
+        }
+
+        double f_exit_hi = f_exit_lo;
+        if (scan.scan_exit) {
+            f_exit_hi = eval_exit(s_hi);
+            auto f_exit_of_t = [&](double t) {
+                State2 s;
+                (void)propagator.propagate(t - req.start_time, s);
+                return eval_exit(s);
+            };
+
+            if (f_exit_lo < 0.0 && f_exit_hi >= 0.0) {
+                double t_root = t_lo;
+                if (diagnostics != nullptr) ++diagnostics->root_refinements;
+                SolveStatus rs = detail::refine_root_bisection(
+                    f_exit_of_t, t_lo, t_hi, f_exit_lo, f_exit_hi, root_eps,
+                    max_iter, t_root);
+                if (rs != SolveStatus::Ok) return rs;
+
+                State2 s_root;
+                (void)propagator.propagate(t_root - req.start_time, s_root);
+                candidates.consider(make_event(EventType::SoiExit, t_root,
+                                               req.central_body, parent_id,
+                                               s_root),
+                                    time_eps);
+            } else if (f_exit_lo < 0.0 && f_exit_hi < 0.0) {
+                double t_mid = 0.5 * (t_lo + t_hi);
+                double f_mid = f_exit_of_t(t_mid);
+                double proximity = std::max(root_eps * 10.0, soi_radius * 0.05);
+                bool possible_maximum = f_mid >= f_exit_lo && f_mid >= f_exit_hi;
+                bool near_boundary = f_mid >= -proximity;
+                if (possible_maximum && near_boundary) {
+                    auto neg_exit_of_t = [&](double t) { return -f_exit_of_t(t); };
+                    double t_max = t_lo;
+                    double neg_f_max = -f_exit_lo;
+                    if (diagnostics != nullptr) ++diagnostics->soi_exit_minimum_refinements;
+                    SolveStatus ms = detail::refine_minimum(
+                        neg_exit_of_t, t_lo, t_hi, root_eps, max_iter, t_max,
+                        neg_f_max);
+
+                    double f_max = -neg_f_max;
+                    if (ms != SolveStatus::Ok && f_max < -root_eps) {
+                        // As above, non-convergence in a non-candidate window should not
+                        // mask ordinary monotonic scan progress.
+                        f_exit_lo = f_exit_hi;
+                    } else if (ms != SolveStatus::Ok) {
+                        return ms;
+                    }
+
+                    if (ms == SolveStatus::Ok && f_max >= -root_eps) {
+                        double t_event = t_max;
+                        if (f_max >= 0.0 && t_max > t_lo + time_eps) {
+                            double t_root = t_lo;
+                            if (diagnostics != nullptr) ++diagnostics->root_refinements;
+                            SolveStatus rs = detail::refine_root_bisection(
+                                f_exit_of_t, t_lo, t_max, f_exit_lo, f_max,
+                                root_eps, max_iter, t_root);
+                            if (rs != SolveStatus::Ok) return rs;
+                            t_event = t_root;
+                        }
+
+                        State2 s_event;
+                        (void)propagator.propagate(t_event - req.start_time, s_event);
+                        candidates.consider(make_event(EventType::SoiExit, t_event,
+                                                       req.central_body, parent_id,
+                                                       s_event),
+                                            time_eps);
+                    }
+                }
+            }
+        }
+
+        for (size_t ci = 0; ci < child_count; ++ci) {
+            const CachedChild& child = children[ci];
+            double f_ch_lo = f_child_lo[ci];
+            double f_ch_hi = eval_child(s_hi, ci, t_hi);
+            auto f_of_t = [&, ci](double t) {
+                State2 s;
+                (void)propagator.propagate(t - req.start_time, s);
+                return eval_child(s, ci, t);
+            };
+
+            if (f_ch_lo > 0.0 && f_ch_hi <= 0.0) {
+                double t_root = t_lo;
+                if (diagnostics != nullptr) ++diagnostics->root_refinements;
+                SolveStatus rs = detail::refine_root_bisection(
+                    f_of_t, t_lo, t_hi, f_ch_lo, f_ch_hi, root_eps, max_iter,
+                    t_root);
+                if (rs != SolveStatus::Ok) return rs;
+
+                State2 s_root;
+                (void)propagator.propagate(t_root - req.start_time, s_root);
+                candidates.consider(make_event(EventType::SoiEntry, t_root,
+                                               req.central_body, child.id,
+                                               s_root),
+                                    time_eps);
+            } else if (f_ch_lo > 0.0 && f_ch_hi > 0.0) {
+                const double half_window_motion =
+                    0.5 * scan.max_relative_speed * (t_hi - t_lo);
+                double proximity =
+                    std::max({root_eps * 10.0, child.soi_radius * 0.05,
+                              half_window_motion});
+                bool too_far_for_midpoint =
+                    std::min(f_ch_lo, f_ch_hi) > proximity + half_window_motion;
+                if (!too_far_for_midpoint) {
+                    double t_mid = 0.5 * (t_lo + t_hi);
+                    double f_mid = f_of_t(t_mid);
+                    bool possible_minimum = f_mid <= f_ch_lo && f_mid <= f_ch_hi;
+                    bool near_boundary = f_mid <= proximity;
+                    if (possible_minimum && near_boundary) {
+                        double t_min = t_lo;
+                        double f_min = f_ch_lo;
+                        if (diagnostics != nullptr) {
+                            ++diagnostics->child_entry_minimum_refinements;
+                        }
+                        SolveStatus ms = detail::refine_minimum(
+                            f_of_t, t_lo, t_hi, root_eps, max_iter, t_min, f_min);
+                        if (ms != SolveStatus::Ok) return ms;
+
+                        if (ms == SolveStatus::Ok && f_min <= root_eps) {
+                            double t_event = t_min;
+                            if (f_min <= 0.0 && t_min > t_lo + time_eps) {
+                                double t_root = t_lo;
+                                if (diagnostics != nullptr) {
+                                    ++diagnostics->root_refinements;
+                                }
+                                SolveStatus rs = detail::refine_root_bisection(
+                                    f_of_t, t_lo, t_min, f_ch_lo, f_min,
+                                    root_eps, max_iter, t_root);
+                                if (rs == SolveStatus::Ok) {
+                                    t_event = t_root;
+                                } else {
+                                    return rs;
+                                }
+                            }
+                            State2 s_event;
+                            (void)propagator.propagate(t_event - req.start_time,
+                                                       s_event);
+                            candidates.consider(make_event(EventType::SoiEntry,
+                                                           t_event,
+                                                           req.central_body,
+                                                           child.id, s_event),
+                                                time_eps);
+                        }
+                    }
+                }
+            }
+            f_child_lo[ci] = f_ch_hi;
+        }
+
+        t_lo = t_hi;
+        s_lo = s_hi;
+        f_imp_lo = f_imp_hi;
+        f_exit_lo = f_exit_hi;
+
+        // Early termination: if we already have a confirmed event earlier than the
+        // current scan position, no later bracket can beat it (scan is time-monotonic).
+        if (candidates.have_best && candidates.best.time < t_lo - time_eps) {
+            break;
+        }
+    }
+
+    return SolveStatus::Ok;
+}
+
 }  // namespace
 
 EventDetector::EventDetector(const BodySystem& bodies, const Tolerances& tolerances,
@@ -510,15 +824,6 @@ SolveStatus EventDetector::find_next_event(const EventSearchRequest& req,
     // --- Step 3: candidate arbitration ---
     CandidateSet candidates;
 
-    // Root evaluation helpers. These operate on a pre-propagated spacecraft state.
-    auto eval_impact = [&](const State2& s) { return length(s.r) - body_radius; };
-    auto eval_exit = [&](const State2& s) { return length(s.r) - soi_radius; };
-    auto eval_child = [&](const State2& s, size_t child_index, double abs_t) {
-        const CachedChild& child = children[child_index];
-        Vec2 rc = child_position(child, abs_t);
-        return length(s.r - rc) - child.soi_radius;
-    };
-
     // --- Step 4: start-state / boundary policy (spec 6.3) ---
 
     consider_start_boundary_events(req, parent_id, body_radius, soi_radius,
@@ -558,305 +863,11 @@ SolveStatus EventDetector::find_next_event(const EventSearchRequest& req,
                                          child_cache.have_radial_range,
                                          child_cache.radial_range, root_eps,
                                          time_eps);
-
-    // --- Step 6: coarse scan loop ---
-    double t_lo = req.start_time;
-    State2 s_lo = req.initial_state;
-    double f_imp_lo = scan.scan_impact ? eval_impact(s_lo) : 0.0;
-    double f_exit_lo = scan.scan_exit ? eval_exit(s_lo) : 0.0;
-    double f_child_lo[kMaxChildrenPerBody];
-    for (size_t i = 0; i < child_count; ++i) {
-        f_child_lo[i] = eval_child(s_lo, i, t_lo);
-    }
-
-    // Hard cap on scan iterations prevents infinite loops from pathological inputs.
-    const int max_scan_steps = 200000;
-    int scan_steps = 0;
-
-    while (t_lo < req.time_limit && scan_steps < max_scan_steps) {
-        ++scan_steps;
-        if (diagnostics_ != nullptr) ++diagnostics_->scan_steps;
-        double t_hi = std::min(t_lo + scan.dt, req.time_limit);
-        State2 s_hi;
-        SolveStatus ps = propagator.propagate(t_hi - req.start_time, s_hi);
-        if (ps != SolveStatus::Ok || !is_finite_state(s_hi)) {
-            // Propagator failed mid-scan. The only failure mode after validation is
-            // the radial singularity at r=0 -- the spacecraft falls into the central
-            // body during (t_lo, t_hi]. Binary-search for the last propagable time
-            // and, if an impact bracket exists there, refine it.
-            double t_valid_lo = t_lo;   // propagation works here
-            double t_valid_hi = t_hi;   // propagation fails here
-            State2 s_last = s_lo;
-            for (int k = 0; k < 64; ++k) {
-                if (t_valid_hi - t_valid_lo <= time_eps) break;
-                double t_m = 0.5 * (t_valid_lo + t_valid_hi);
-                State2 s_m;
-                SolveStatus ms = propagator.propagate(t_m - req.start_time, s_m);
-                if (ms == SolveStatus::Ok && is_finite_state(s_m)) {
-                    t_valid_lo = t_m;
-                    s_last = s_m;
-                } else {
-                    t_valid_hi = t_m;
-                }
-            }
-            double f_imp_end = eval_impact(s_last);
-            if (f_imp_lo > 0.0 && f_imp_end <= 0.0) {
-                auto f_of_t = [&](double t) {
-                    State2 s;
-                    (void)propagator.propagate(t - req.start_time, s);
-                    return eval_impact(s);
-                };
-                double t_root = t_lo;
-                if (diagnostics_ != nullptr) ++diagnostics_->root_refinements;
-                SolveStatus rs = detail::refine_root_bisection(
-                    f_of_t, t_lo, t_valid_lo, f_imp_lo, f_imp_end, root_eps, max_iter,
-                    t_root);
-                if (rs != SolveStatus::Ok) return rs;
-
-                State2 s_root;
-                (void)propagator.propagate(t_root - req.start_time, s_root);
-                candidates.consider(make_event(EventType::Impact, t_root,
-                                               req.central_body, InvalidBody,
-                                               s_root),
-                                    time_eps);
-            }
-            if (candidates.have_best) out = candidates.best;
-            else set_time_limit_output();
-            return SolveStatus::Ok;
-        }
-
-        double f_imp_hi = f_imp_lo;
-        if (scan.scan_impact) {
-            // --- Impact bracket ---
-            f_imp_hi = eval_impact(s_hi);
-            auto f_impact_of_t = [&](double t) {
-                State2 s;
-                (void)propagator.propagate(t - req.start_time, s);
-                return eval_impact(s);
-            };
-            if (f_imp_lo > 0.0 && f_imp_hi <= 0.0) {
-            double t_root = t_lo;
-            if (diagnostics_ != nullptr) ++diagnostics_->root_refinements;
-            SolveStatus rs = detail::refine_root_bisection(
-                f_impact_of_t, t_lo, t_hi, f_imp_lo, f_imp_hi, root_eps, max_iter,
-                t_root);
-            if (rs != SolveStatus::Ok) return rs;
-
-            State2 s_root;
-            (void)propagator.propagate(t_root - req.start_time, s_root);
-            candidates.consider(make_event(EventType::Impact, t_root, req.central_body,
-                                           InvalidBody, s_root),
-                                time_eps);
-        } else if (f_imp_lo > 0.0 && f_imp_hi > 0.0) {
-            double t_mid = 0.5 * (t_lo + t_hi);
-            double f_mid = f_impact_of_t(t_mid);
-            double proximity =
-                std::max({root_eps * 10.0, body_radius,
-                          0.5 * scan.spacecraft_speed * scan.dt});
-            bool possible_minimum = f_mid <= f_imp_lo && f_mid <= f_imp_hi;
-            bool near_boundary = f_mid <= proximity;
-            if (!(possible_minimum && near_boundary)) {
-                // Same-sign windows are common. Only refine when the coarse
-                // midpoint suggests a local minimum near the boundary.
-            } else {
-            double t_min = t_lo;
-            double f_min = f_imp_lo;
-            if (diagnostics_ != nullptr) ++diagnostics_->impact_minimum_refinements;
-            SolveStatus ms = detail::refine_minimum(
-                f_impact_of_t, t_lo, t_hi, root_eps, max_iter, t_min, f_min);
-            if (ms != SolveStatus::Ok && f_min > root_eps) {
-                // The bounded minimum search did not converge, but the best
-                // sampled value is still comfortably outside the boundary.
-                // Continue scanning instead of treating a non-candidate window
-                // as an event-refinement failure.
-                f_imp_lo = f_imp_hi;
-            } else if (ms != SolveStatus::Ok) {
-                return ms;
-            }
-
-            if (ms == SolveStatus::Ok && f_min <= root_eps) {
-                double t_event = t_min;
-                if (f_min <= 0.0 && t_min > t_lo + time_eps) {
-                    double t_root = t_lo;
-                    if (diagnostics_ != nullptr) ++diagnostics_->root_refinements;
-                    SolveStatus rs = detail::refine_root_bisection(
-                        f_impact_of_t, t_lo, t_min, f_imp_lo, f_min, root_eps, max_iter,
-                        t_root);
-                    if (rs != SolveStatus::Ok) return rs;
-                    t_event = t_root;
-                }
-
-                State2 s_event;
-                (void)propagator.propagate(t_event - req.start_time, s_event);
-                candidates.consider(make_event(EventType::Impact, t_event,
-                                               req.central_body, InvalidBody,
-                                               s_event),
-                                    time_eps);
-            }
-            }
-        }
-        }
-
-        double f_exit_hi = f_exit_lo;
-        if (scan.scan_exit) {
-            // --- SOI exit bracket ---
-            f_exit_hi = eval_exit(s_hi);
-            auto f_exit_of_t = [&](double t) {
-                State2 s;
-                (void)propagator.propagate(t - req.start_time, s);
-                return eval_exit(s);
-            };
-            if (f_exit_lo < 0.0 && f_exit_hi >= 0.0) {
-            double t_root = t_lo;
-            if (diagnostics_ != nullptr) ++diagnostics_->root_refinements;
-            SolveStatus rs = detail::refine_root_bisection(
-                f_exit_of_t, t_lo, t_hi, f_exit_lo, f_exit_hi, root_eps, max_iter,
-                t_root);
-            if (rs != SolveStatus::Ok) return rs;
-
-            State2 s_root;
-            (void)propagator.propagate(t_root - req.start_time, s_root);
-            candidates.consider(make_event(EventType::SoiExit, t_root,
-                                           req.central_body, parent_id, s_root),
-                                time_eps);
-        } else if (f_exit_lo < 0.0 && f_exit_hi < 0.0) {
-            double t_mid = 0.5 * (t_lo + t_hi);
-            double f_mid = f_exit_of_t(t_mid);
-            double proximity = std::max(root_eps * 10.0, soi_radius * 0.05);
-            bool possible_maximum = f_mid >= f_exit_lo && f_mid >= f_exit_hi;
-            bool near_boundary = f_mid >= -proximity;
-            if (!(possible_maximum && near_boundary)) {
-                // Same-sign windows are common. Only refine when the coarse
-                // midpoint suggests a local maximum near the SOI boundary.
-            } else {
-            auto neg_exit_of_t = [&](double t) { return -f_exit_of_t(t); };
-            double t_max = t_lo;
-            double neg_f_max = -f_exit_lo;
-            if (diagnostics_ != nullptr) ++diagnostics_->soi_exit_minimum_refinements;
-            SolveStatus ms = detail::refine_minimum(
-                neg_exit_of_t, t_lo, t_hi, root_eps, max_iter, t_max, neg_f_max);
-
-            double f_max = -neg_f_max;
-            if (ms != SolveStatus::Ok && f_max < -root_eps) {
-                // As above, non-convergence in a non-candidate window should not
-                // mask ordinary monotonic scan progress.
-                f_exit_lo = f_exit_hi;
-            } else if (ms != SolveStatus::Ok) {
-                return ms;
-            }
-
-            if (ms == SolveStatus::Ok && f_max >= -root_eps) {
-                double t_event = t_max;
-                if (f_max >= 0.0 && t_max > t_lo + time_eps) {
-                    double t_root = t_lo;
-                    if (diagnostics_ != nullptr) ++diagnostics_->root_refinements;
-                    SolveStatus rs = detail::refine_root_bisection(
-                        f_exit_of_t, t_lo, t_max, f_exit_lo, f_max, root_eps, max_iter,
-                        t_root);
-                    if (rs != SolveStatus::Ok) return rs;
-                    t_event = t_root;
-                }
-
-                State2 s_event;
-                (void)propagator.propagate(t_event - req.start_time, s_event);
-                candidates.consider(make_event(EventType::SoiExit, t_event,
-                                               req.central_body, parent_id,
-                                               s_event),
-                                    time_eps);
-            }
-            }
-        }
-        }
-
-        // --- Child entry brackets ---
-        for (size_t ci = 0; ci < child_count; ++ci) {
-            const CachedChild& child = children[ci];
-            double f_ch_lo = f_child_lo[ci];
-            double f_ch_hi = eval_child(s_hi, ci, t_hi);
-            auto f_of_t = [&, ci](double t) {
-                State2 s;
-                (void)propagator.propagate(t - req.start_time, s);
-                return eval_child(s, ci, t);
-            };
-            if (f_ch_lo > 0.0 && f_ch_hi <= 0.0) {
-                double t_root = t_lo;
-                if (diagnostics_ != nullptr) ++diagnostics_->root_refinements;
-                SolveStatus rs = detail::refine_root_bisection(
-                    f_of_t, t_lo, t_hi, f_ch_lo, f_ch_hi, root_eps, max_iter, t_root);
-                if (rs != SolveStatus::Ok) return rs;
-
-                State2 s_root;
-                (void)propagator.propagate(t_root - req.start_time, s_root);
-                candidates.consider(make_event(EventType::SoiEntry, t_root,
-                                               req.central_body, child.id, s_root),
-                                    time_eps);
-            } else if (f_ch_lo > 0.0 && f_ch_hi > 0.0) {
-                const double half_window_motion =
-                    0.5 * scan.max_relative_speed * (t_hi - t_lo);
-                double proximity =
-                    std::max({root_eps * 10.0, child.soi_radius * 0.05,
-                              half_window_motion});
-                bool too_far_for_midpoint =
-                    std::min(f_ch_lo, f_ch_hi) > proximity + half_window_motion;
-                if (too_far_for_midpoint) {
-                    // The distance function cannot plausibly dip close enough
-                    // to the child SOI within this window to warrant a midpoint
-                    // propagation.
-                } else {
-                double t_mid = 0.5 * (t_lo + t_hi);
-                double f_mid = f_of_t(t_mid);
-                bool possible_minimum = f_mid <= f_ch_lo && f_mid <= f_ch_hi;
-                bool near_boundary = f_mid <= proximity;
-                if (!(possible_minimum && near_boundary)) {
-                    // Same-sign windows are common. Only refine when the coarse
-                    // midpoint suggests a local minimum near the child SOI.
-                } else {
-                double t_min = t_lo;
-                double f_min = f_ch_lo;
-                if (diagnostics_ != nullptr) ++diagnostics_->child_entry_minimum_refinements;
-                SolveStatus ms = detail::refine_minimum(
-                    f_of_t, t_lo, t_hi, root_eps, max_iter, t_min, f_min);
-                if (ms != SolveStatus::Ok) return ms;
-
-                if (ms == SolveStatus::Ok && f_min <= root_eps) {
-                    double t_event = t_min;
-                    if (f_min <= 0.0 && t_min > t_lo + time_eps) {
-                        double t_root = t_lo;
-                        if (diagnostics_ != nullptr) ++diagnostics_->root_refinements;
-                        SolveStatus rs = detail::refine_root_bisection(
-                            f_of_t, t_lo, t_min, f_ch_lo, f_min, root_eps, max_iter,
-                            t_root);
-                        if (rs == SolveStatus::Ok) {
-                            t_event = t_root;
-                        } else {
-                            return rs;
-                        }
-                    }
-                    State2 s_event;
-                    (void)propagator.propagate(t_event - req.start_time, s_event);
-                    candidates.consider(make_event(EventType::SoiEntry, t_event,
-                                                   req.central_body, child.id,
-                                                   s_event),
-                                        time_eps);
-                }
-                }
-                }
-            }
-            f_child_lo[ci] = f_ch_hi;
-        }
-
-        // --- Advance scan window ---
-        t_lo = t_hi;
-        s_lo = s_hi;
-        f_imp_lo = f_imp_hi;
-        f_exit_lo = f_exit_hi;
-
-        // Early termination: if we already have a confirmed event earlier than the
-        // current scan position, no later bracket can beat it (scan is time-monotonic).
-        if (candidates.have_best && candidates.best.time < t_lo - time_eps) {
-            break;
-        }
-    }
+    SolveStatus scan_status =
+        scan_for_events(req, parent_id, body_radius, soi_radius, children,
+                        child_count, propagator, scan, root_eps, time_eps,
+                        max_iter, diagnostics_, candidates);
+    if (scan_status != SolveStatus::Ok) return scan_status;
 
     if (candidates.have_best) {
         out = candidates.best;
