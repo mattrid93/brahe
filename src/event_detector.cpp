@@ -615,13 +615,10 @@ SolveStatus EventDetector::find_next_event(const EventSearchRequest& req,
 
                 State2 s_root;
                 (void)propagator.propagate(t_root - req.start_time, s_root);
-                PredictedEvent ev;
-                ev.type = EventType::Impact;
-                ev.time = t_root;
-                ev.from_body = req.central_body;
-                ev.to_body = InvalidBody;
-                ev.state = s_root;
-                candidates.consider(ev, time_eps);
+                candidates.consider(make_event(EventType::Impact, t_root,
+                                               req.central_body, InvalidBody,
+                                               s_root),
+                                    time_eps);
             }
             if (candidates.have_best) out = candidates.best;
             else set_time_limit_output();
@@ -647,13 +644,9 @@ SolveStatus EventDetector::find_next_event(const EventSearchRequest& req,
 
             State2 s_root;
             (void)propagator.propagate(t_root - req.start_time, s_root);
-            PredictedEvent ev;
-            ev.type = EventType::Impact;
-            ev.time = t_root;
-            ev.from_body = req.central_body;
-            ev.to_body = InvalidBody;
-            ev.state = s_root;
-            candidates.consider(ev, time_eps);
+            candidates.consider(make_event(EventType::Impact, t_root, req.central_body,
+                                           InvalidBody, s_root),
+                                time_eps);
         } else if (f_imp_lo > 0.0 && f_imp_hi > 0.0) {
             double t_mid = 0.5 * (t_lo + t_hi);
             double f_mid = f_impact_of_t(t_mid);
@@ -695,13 +688,10 @@ SolveStatus EventDetector::find_next_event(const EventSearchRequest& req,
 
                 State2 s_event;
                 (void)propagator.propagate(t_event - req.start_time, s_event);
-                PredictedEvent ev;
-                ev.type = EventType::Impact;
-                ev.time = t_event;
-                ev.from_body = req.central_body;
-                ev.to_body = InvalidBody;
-                ev.state = s_event;
-                candidates.consider(ev, time_eps);
+                candidates.consider(make_event(EventType::Impact, t_event,
+                                               req.central_body, InvalidBody,
+                                               s_event),
+                                    time_eps);
             }
             }
         }
@@ -726,13 +716,9 @@ SolveStatus EventDetector::find_next_event(const EventSearchRequest& req,
 
             State2 s_root;
             (void)propagator.propagate(t_root - req.start_time, s_root);
-            PredictedEvent ev;
-            ev.type = EventType::SoiExit;
-            ev.time = t_root;
-            ev.from_body = req.central_body;
-            ev.to_body = parent_id;
-            ev.state = s_root;
-            candidates.consider(ev, time_eps);
+            candidates.consider(make_event(EventType::SoiExit, t_root,
+                                           req.central_body, parent_id, s_root),
+                                time_eps);
         } else if (f_exit_lo < 0.0 && f_exit_hi < 0.0) {
             double t_mid = 0.5 * (t_lo + t_hi);
             double f_mid = f_exit_of_t(t_mid);
@@ -773,13 +759,10 @@ SolveStatus EventDetector::find_next_event(const EventSearchRequest& req,
 
                 State2 s_event;
                 (void)propagator.propagate(t_event - req.start_time, s_event);
-                PredictedEvent ev;
-                ev.type = EventType::SoiExit;
-                ev.time = t_event;
-                ev.from_body = req.central_body;
-                ev.to_body = parent_id;
-                ev.state = s_event;
-                candidates.consider(ev, time_eps);
+                candidates.consider(make_event(EventType::SoiExit, t_event,
+                                               req.central_body, parent_id,
+                                               s_event),
+                                    time_eps);
             }
             }
         }
@@ -804,13 +787,9 @@ SolveStatus EventDetector::find_next_event(const EventSearchRequest& req,
 
                 State2 s_root;
                 (void)propagator.propagate(t_root - req.start_time, s_root);
-                PredictedEvent ev;
-                ev.type = EventType::SoiEntry;
-                ev.time = t_root;
-                ev.from_body = req.central_body;
-                ev.to_body = child.id;
-                ev.state = s_root;
-                candidates.consider(ev, time_eps);
+                candidates.consider(make_event(EventType::SoiEntry, t_root,
+                                               req.central_body, child.id, s_root),
+                                    time_eps);
             } else if (f_ch_lo > 0.0 && f_ch_hi > 0.0) {
                 const double half_window_motion =
                     0.5 * scan.max_relative_speed * (t_hi - t_lo);
@@ -855,13 +834,10 @@ SolveStatus EventDetector::find_next_event(const EventSearchRequest& req,
                     }
                     State2 s_event;
                     (void)propagator.propagate(t_event - req.start_time, s_event);
-                    PredictedEvent ev;
-                    ev.type = EventType::SoiEntry;
-                    ev.time = t_event;
-                    ev.from_body = req.central_body;
-                    ev.to_body = child.id;
-                    ev.state = s_event;
-                    candidates.consider(ev, time_eps);
+                    candidates.consider(make_event(EventType::SoiEntry, t_event,
+                                                   req.central_body, child.id,
+                                                   s_event),
+                                        time_eps);
                 }
                 }
                 }
