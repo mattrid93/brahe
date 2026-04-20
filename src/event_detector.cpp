@@ -177,6 +177,14 @@ struct ScanConfig {
     double dt = 0.0;
 };
 
+struct ChildCache {
+    CachedChild children[kMaxChildrenPerBody];
+    size_t count = 0;
+    bool radially_culled = false;
+    bool have_radial_range = false;
+    RadialRange radial_range;
+};
+
 enum class RadiusCrossingDirection {
     Inward,
     Outward,
@@ -288,6 +296,43 @@ bool child_soi_radially_overlaps(const RadialRange& range, const CachedChild& ch
     const double child_outer = child.orbit_radius + child.soi_radius;
     return range.max_radius + root_eps >= child_inner &&
            range.min_radius - root_eps <= child_outer;
+}
+
+SolveStatus collect_active_children(const BodySystem& bodies, BodyId central_body,
+                                    double mu, const State2& initial_state,
+                                    double root_eps, ChildCache& out) {
+    const BodyId* child_begin = bodies.children_begin(central_body);
+    const BodyId* child_end = bodies.children_end(central_body);
+    const size_t num_children = static_cast<size_t>(child_end - child_begin);
+    if (num_children > kMaxChildrenPerBody) {
+        return SolveStatus::InvalidInput;
+    }
+
+    out = ChildCache{};
+    for (const BodyId* p = child_begin; p != child_end; ++p) {
+        const BodyDef* ch = bodies.get_body(*p);
+        if (ch == nullptr) continue;
+        out.children[out.count++] =
+            CachedChild{ch->id, ch->soi_radius, ch->orbit_radius,
+                        ch->angular_rate, ch->phase_at_epoch};
+    }
+
+    if (conic_radial_range(mu, initial_state, out.radial_range)) {
+        out.have_radial_range = true;
+    }
+    if (out.count > 0 && out.have_radial_range) {
+        size_t active_count = 0;
+        for (size_t i = 0; i < out.count; ++i) {
+            if (child_soi_radially_overlaps(out.radial_range, out.children[i],
+                                            root_eps)) {
+                out.children[active_count++] = out.children[i];
+            }
+        }
+        out.radially_culled = active_count == 0;
+        out.count = active_count;
+    }
+
+    return SolveStatus::Ok;
 }
 
 void consider_start_boundary_events(const EventSearchRequest& req, BodyId parent_id,
@@ -450,40 +495,13 @@ SolveStatus EventDetector::find_next_event(const EventSearchRequest& req,
     const double horizon = req.time_limit - req.start_time;
     const CachedConicPropagator propagator(mu, req.initial_state);
 
-    // Children of the central body (in canonical BodyId order).
-    const BodyId* child_begin = bodies_.children_begin(req.central_body);
-    const BodyId* child_end = bodies_.children_end(req.central_body);
-    const size_t num_children = static_cast<size_t>(child_end - child_begin);
-    if (num_children > kMaxChildrenPerBody) {
-        return SolveStatus::InvalidInput;
-    }
-
-    CachedChild children[kMaxChildrenPerBody];
-    size_t child_count = 0;
-    for (const BodyId* p = child_begin; p != child_end; ++p) {
-        const BodyDef* ch = bodies_.get_body(*p);
-        if (ch == nullptr) continue;
-        children[child_count++] =
-            CachedChild{ch->id, ch->soi_radius, ch->orbit_radius,
-                        ch->angular_rate, ch->phase_at_epoch};
-    }
-
-    bool children_radially_culled = false;
-    bool have_radial_range = false;
-    RadialRange radial_range;
-    if (conic_radial_range(mu, req.initial_state, radial_range)) {
-        have_radial_range = true;
-    }
-    if (child_count > 0 && have_radial_range) {
-        size_t active_count = 0;
-        for (size_t i = 0; i < child_count; ++i) {
-            if (child_soi_radially_overlaps(radial_range, children[i], root_eps)) {
-                children[active_count++] = children[i];
-            }
-        }
-        children_radially_culled = active_count == 0;
-        child_count = active_count;
-    }
+    ChildCache child_cache;
+    SolveStatus child_status =
+        collect_active_children(bodies_, req.central_body, mu, req.initial_state,
+                                root_eps, child_cache);
+    if (child_status != SolveStatus::Ok) return child_status;
+    const CachedChild* children = child_cache.children;
+    const size_t child_count = child_cache.count;
 
     auto set_time_limit_output = [&]() {
         out = make_time_limit_event(req, propagator, horizon);
@@ -523,7 +541,7 @@ SolveStatus EventDetector::find_next_event(const EventSearchRequest& req,
                                          propagator, candidates);
     if (central_status != SolveStatus::Ok) return central_status;
 
-    if (children_radially_culled) {
+    if (child_cache.radially_culled) {
         if (candidates.have_best) out = candidates.best;
         else set_time_limit_output();
         return SolveStatus::Ok;
@@ -536,8 +554,10 @@ SolveStatus EventDetector::find_next_event(const EventSearchRequest& req,
     // --- Step 5: coarse scan step size ---
     // Adaptive step bounded by smallest child SOI / max relative speed, plus safety caps.
     ScanConfig scan = choose_scan_config(req, horizon, body_radius, soi_radius,
-                                         children, child_count, have_radial_range,
-                                         radial_range, root_eps, time_eps);
+                                         children, child_count,
+                                         child_cache.have_radial_range,
+                                         child_cache.radial_range, root_eps,
+                                         time_eps);
 
     // --- Step 6: coarse scan loop ---
     double t_lo = req.start_time;
