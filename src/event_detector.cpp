@@ -22,6 +22,18 @@ struct CachedChild {
     double phase_at_epoch = 0.0;
 };
 
+struct CandidateSet {
+    bool have_best = false;
+    PredictedEvent best{};
+
+    void consider(const PredictedEvent& ev, double time_epsilon) {
+        if (!have_best || detail::event_precedes(ev, best, time_epsilon)) {
+            best = ev;
+            have_best = true;
+        }
+    }
+};
+
 bool is_finite_state(const State2& s) {
     return std::isfinite(s.r.x) && std::isfinite(s.r.y) &&
            std::isfinite(s.v.x) && std::isfinite(s.v.y);
@@ -36,6 +48,17 @@ void init_output(PredictedEvent& out, double fallback_time) {
     out.from_body = InvalidBody;
     out.to_body = InvalidBody;
     out.state = State2{{0.0, 0.0}, {0.0, 0.0}};
+}
+
+PredictedEvent make_event(EventType type, double time, BodyId from_body,
+                          BodyId to_body, const State2& state) {
+    PredictedEvent ev;
+    ev.type = type;
+    ev.time = time;
+    ev.from_body = from_body;
+    ev.to_body = to_body;
+    ev.state = state;
+    return ev;
 }
 
 class CachedConicPropagator {
@@ -113,6 +136,18 @@ private:
     bool use_cached_ = false;
 };
 
+PredictedEvent make_time_limit_event(const EventSearchRequest& req,
+                                     const CachedConicPropagator& propagator,
+                                     double horizon) {
+    State2 at_end;
+    SolveStatus ps = propagator.propagate(horizon, at_end);
+    if (ps != SolveStatus::Ok || !is_finite_state(at_end)) {
+        at_end = req.initial_state;
+    }
+    return make_event(EventType::TimeLimit, req.time_limit, req.central_body,
+                      InvalidBody, at_end);
+}
+
 Vec2 child_position(const CachedChild& child, double t) {
     double theta = child.phase_at_epoch + child.angular_rate * t;
     return {child.orbit_radius * std::cos(theta), child.orbit_radius * std::sin(theta)};
@@ -132,6 +167,14 @@ struct RadiusCrossing {
 struct RadialRange {
     double min_radius = 0.0;
     double max_radius = std::numeric_limits<double>::infinity();
+};
+
+struct ScanConfig {
+    bool scan_impact = false;
+    bool scan_exit = false;
+    double spacecraft_speed = 0.0;
+    double max_relative_speed = 0.0;
+    double dt = 0.0;
 };
 
 enum class RadiusCrossingDirection {
@@ -247,6 +290,122 @@ bool child_soi_radially_overlaps(const RadialRange& range, const CachedChild& ch
            range.min_radius - root_eps <= child_outer;
 }
 
+void consider_start_boundary_events(const EventSearchRequest& req, BodyId parent_id,
+                                    double body_radius, double soi_radius,
+                                    const CachedChild* children, size_t child_count,
+                                    double root_eps, double time_eps,
+                                    CandidateSet& candidates) {
+    const State2& initial = req.initial_state;
+
+    // Impact at start: fire unconditionally if already at-or-inside the body radius.
+    double f_impact = detail::impact_function(initial.r, body_radius);
+    if (f_impact <= root_eps) {
+        candidates.consider(make_event(EventType::Impact, req.start_time, req.central_body,
+                                       InvalidBody, initial),
+                            time_eps);
+    }
+
+    // SOI exit at start: fire only if outside by > root_eps OR on boundary with outward trend.
+    double f_exit = detail::soi_exit_function(initial.r, soi_radius);
+    double r_dot_v = dot(initial.r, initial.v);
+    bool outside = f_exit > root_eps;
+    bool on_boundary_outward = std::abs(f_exit) <= root_eps && r_dot_v > 0.0;
+    if (outside || on_boundary_outward) {
+        candidates.consider(make_event(EventType::SoiExit, req.start_time,
+                                       req.central_body, parent_id, initial),
+                            time_eps);
+    }
+
+    // Child SOI entry at start: fire only if inside by > root_eps OR on boundary with inward trend.
+    for (size_t i = 0; i < child_count; ++i) {
+        const CachedChild& child = children[i];
+        Vec2 r_child = child_position(child, req.start_time);
+        Vec2 v_child = child_velocity(child, req.start_time);
+        Vec2 d = initial.r - r_child;
+        Vec2 v_rel = initial.v - v_child;
+        double f = detail::child_entry_function(initial.r, r_child, child.soi_radius);
+        double d_dot_v = dot(d, v_rel);  // sign of d/dt(dist^2)/2 = sign of d/dt(dist)
+        bool inside = f < -root_eps;
+        bool on_boundary_inward = std::abs(f) <= root_eps && d_dot_v < 0.0;
+        if (inside || on_boundary_inward) {
+            candidates.consider(make_event(EventType::SoiEntry, req.start_time,
+                                           req.central_body, child.id, initial),
+                                time_eps);
+        }
+    }
+}
+
+SolveStatus consider_analytic_central_events(const EventSearchRequest& req,
+                                             double mu, double body_radius,
+                                             double soi_radius, BodyId parent_id,
+                                             double horizon, double time_eps,
+                                             const CachedConicPropagator& propagator,
+                                             CandidateSet& candidates) {
+    RadiusCrossing impact =
+        first_central_radius_crossing(mu, req.initial_state, body_radius,
+                                      RadiusCrossingDirection::Inward, horizon,
+                                      time_eps);
+    if (impact.found) {
+        State2 s_event;
+        SolveStatus ps = propagator.propagate(impact.dt, s_event);
+        if (ps != SolveStatus::Ok) return ps;
+        candidates.consider(make_event(EventType::Impact, req.start_time + impact.dt,
+                                       req.central_body, InvalidBody, s_event),
+                            time_eps);
+    }
+
+    RadiusCrossing exit =
+        first_central_radius_crossing(mu, req.initial_state, soi_radius,
+                                      RadiusCrossingDirection::Outward, horizon,
+                                      time_eps);
+    if (exit.found) {
+        State2 s_event;
+        SolveStatus ps = propagator.propagate(exit.dt, s_event);
+        if (ps != SolveStatus::Ok) return ps;
+        candidates.consider(make_event(EventType::SoiExit, req.start_time + exit.dt,
+                                       req.central_body, parent_id, s_event),
+                            time_eps);
+    }
+
+    return SolveStatus::Ok;
+}
+
+ScanConfig choose_scan_config(const EventSearchRequest& req, double horizon,
+                              double body_radius, double soi_radius,
+                              const CachedChild* children, size_t child_count,
+                              bool have_radial_range, const RadialRange& radial_range,
+                              double root_eps, double time_eps) {
+    ScanConfig config;
+    config.scan_impact =
+        !have_radial_range || radial_range.min_radius <= body_radius + root_eps;
+    config.scan_exit =
+        !have_radial_range || radial_range.max_radius >= soi_radius - root_eps;
+
+    config.spacecraft_speed = length(req.initial_state.v);
+    config.max_relative_speed = config.spacecraft_speed;
+
+    double min_child_soi = std::numeric_limits<double>::infinity();
+    for (size_t i = 0; i < child_count; ++i) {
+        const CachedChild& child = children[i];
+        double v_moon = std::abs(child.orbit_radius * child.angular_rate);
+        config.max_relative_speed =
+            std::max(config.max_relative_speed, config.spacecraft_speed + v_moon);
+        min_child_soi = std::min(min_child_soi, child.soi_radius);
+    }
+
+    const double v_floor = 0.1;
+    double dt_child = std::isfinite(min_child_soi)
+                          ? (min_child_soi / std::max(config.max_relative_speed, v_floor))
+                          : std::numeric_limits<double>::infinity();
+    double dt_default = horizon / 50.0;
+    double dt_floor = std::max(time_eps * 100.0, 1e-12);
+    config.dt = std::min(dt_child, dt_default);
+    config.dt = std::max(config.dt, dt_floor);
+    if (config.dt > horizon) config.dt = horizon;
+
+    return config;
+}
+
 }  // namespace
 
 EventDetector::EventDetector(const BodySystem& bodies, const Tolerances& tolerances,
@@ -327,28 +486,11 @@ SolveStatus EventDetector::find_next_event(const EventSearchRequest& req,
     }
 
     auto set_time_limit_output = [&]() {
-        State2 at_end;
-        SolveStatus ps = propagator.propagate(horizon, at_end);
-        out.type = EventType::TimeLimit;
-        out.time = req.time_limit;
-        out.from_body = req.central_body;
-        out.to_body = InvalidBody;
-        if (ps != SolveStatus::Ok || !is_finite_state(at_end)) {
-            out.state = req.initial_state;
-        } else {
-            out.state = at_end;
-        }
+        out = make_time_limit_event(req, propagator, horizon);
     };
 
     // --- Step 3: candidate arbitration ---
-    PredictedEvent best{};
-    bool have_best = false;
-    auto consider = [&](const PredictedEvent& ev) {
-        if (!have_best || detail::event_precedes(ev, best, time_eps)) {
-            best = ev;
-            have_best = true;
-        }
-    };
+    CandidateSet candidates;
 
     // Root evaluation helpers. These operate on a pre-propagated spacecraft state.
     auto eval_impact = [&](const State2& s) { return length(s.r) - body_radius; };
@@ -361,63 +503,13 @@ SolveStatus EventDetector::find_next_event(const EventSearchRequest& req,
 
     // --- Step 4: start-state / boundary policy (spec 6.3) ---
 
-    // Impact at start: fire unconditionally if already at-or-inside the body radius.
-    {
-        double f = eval_impact(req.initial_state);
-        if (f <= root_eps) {
-            PredictedEvent ev;
-            ev.type = EventType::Impact;
-            ev.time = req.start_time;
-            ev.from_body = req.central_body;
-            ev.to_body = InvalidBody;
-            ev.state = req.initial_state;
-            consider(ev);
-        }
-    }
-
-    // SOI exit at start: fire only if outside by > root_eps OR on boundary with outward trend.
-    {
-        double f = eval_exit(req.initial_state);
-        double r_dot_v = dot(req.initial_state.r, req.initial_state.v);
-        bool outside = f > root_eps;
-        bool on_boundary_outward = std::abs(f) <= root_eps && r_dot_v > 0.0;
-        if (outside || on_boundary_outward) {
-            PredictedEvent ev;
-            ev.type = EventType::SoiExit;
-            ev.time = req.start_time;
-            ev.from_body = req.central_body;
-            ev.to_body = parent_id;  // InvalidBody if central is root
-            ev.state = req.initial_state;
-            consider(ev);
-        }
-    }
-
-    // Child SOI entry at start: fire only if inside by > root_eps OR on boundary with inward trend.
-    for (size_t i = 0; i < child_count; ++i) {
-        const CachedChild& child = children[i];
-        Vec2 r_child = child_position(child, req.start_time);
-        Vec2 v_child = child_velocity(child, req.start_time);
-        Vec2 d = req.initial_state.r - r_child;
-        Vec2 v_rel = req.initial_state.v - v_child;
-        double dist = length(d);
-        double f = dist - child.soi_radius;
-        double d_dot_v = dot(d, v_rel);  // sign of d/dt(dist^2)/2 = sign of d/dt(dist)
-        bool inside = f < -root_eps;
-        bool on_boundary_inward = std::abs(f) <= root_eps && d_dot_v < 0.0;
-        if (inside || on_boundary_inward) {
-            PredictedEvent ev;
-            ev.type = EventType::SoiEntry;
-            ev.time = req.start_time;
-            ev.from_body = req.central_body;
-            ev.to_body = child.id;
-            ev.state = req.initial_state;
-            consider(ev);
-        }
-    }
+    consider_start_boundary_events(req, parent_id, body_radius, soi_radius,
+                                   children, child_count, root_eps, time_eps,
+                                   candidates);
 
     // Degenerate horizon: skip scan entirely.
     if (horizon <= time_eps) {
-        if (have_best) out = best;
+        if (candidates.have_best) out = candidates.best;
         else set_time_limit_output();
         return SolveStatus::Ok;
     }
@@ -425,84 +517,33 @@ SolveStatus EventDetector::find_next_event(const EventSearchRequest& req,
     // Central body impact and SOI exit depend only on the spacecraft's fixed conic
     // around the current central body, so solve their radius crossings analytically
     // before falling back to the coarse scan used for moving child SOIs.
-    {
-        RadiusCrossing crossing =
-            first_central_radius_crossing(mu, req.initial_state, body_radius,
-                                          RadiusCrossingDirection::Inward, horizon,
-                                          time_eps);
-        if (crossing.found) {
-            State2 s_event;
-            SolveStatus ps = propagator.propagate(crossing.dt, s_event);
-            if (ps != SolveStatus::Ok) return ps;
-            PredictedEvent ev;
-            ev.type = EventType::Impact;
-            ev.time = req.start_time + crossing.dt;
-            ev.from_body = req.central_body;
-            ev.to_body = InvalidBody;
-            ev.state = s_event;
-            consider(ev);
-        }
-    }
-    {
-        RadiusCrossing crossing =
-            first_central_radius_crossing(mu, req.initial_state, soi_radius,
-                                          RadiusCrossingDirection::Outward, horizon,
-                                          time_eps);
-        if (crossing.found) {
-            State2 s_event;
-            SolveStatus ps = propagator.propagate(crossing.dt, s_event);
-            if (ps != SolveStatus::Ok) return ps;
-            PredictedEvent ev;
-            ev.type = EventType::SoiExit;
-            ev.time = req.start_time + crossing.dt;
-            ev.from_body = req.central_body;
-            ev.to_body = parent_id;
-            ev.state = s_event;
-            consider(ev);
-        }
-    }
+    SolveStatus central_status =
+        consider_analytic_central_events(req, mu, body_radius, soi_radius,
+                                         parent_id, horizon, time_eps,
+                                         propagator, candidates);
+    if (central_status != SolveStatus::Ok) return central_status;
 
     if (children_radially_culled) {
-        if (have_best) out = best;
+        if (candidates.have_best) out = candidates.best;
         else set_time_limit_output();
         return SolveStatus::Ok;
     }
-    if (child_count == 0 && parent_id != InvalidBody && have_best) {
-        out = best;
+    if (child_count == 0 && parent_id != InvalidBody && candidates.have_best) {
+        out = candidates.best;
         return SolveStatus::Ok;
     }
 
-    const bool scan_impact =
-        !have_radial_range || radial_range.min_radius <= body_radius + root_eps;
-    const bool scan_exit =
-        !have_radial_range || radial_range.max_radius >= soi_radius - root_eps;
-
     // --- Step 5: coarse scan step size ---
     // Adaptive step bounded by smallest child SOI / max relative speed, plus safety caps.
-    double v_sc = length(req.initial_state.v);
-    double v_rel_max = v_sc;
-    double min_child_soi = std::numeric_limits<double>::infinity();
-    for (size_t i = 0; i < child_count; ++i) {
-        const CachedChild& child = children[i];
-        double v_moon = std::abs(child.orbit_radius * child.angular_rate);
-        v_rel_max = std::max(v_rel_max, v_sc + v_moon);
-        min_child_soi = std::min(min_child_soi, child.soi_radius);
-    }
-    const double v_floor = 0.1;
-    double dt_child = std::isfinite(min_child_soi)
-                          ? (min_child_soi / std::max(v_rel_max, v_floor))
-                          : std::numeric_limits<double>::infinity();
-    double dt_default = horizon / 50.0;
-    double dt_floor = std::max(time_eps * 100.0, 1e-12);
-    double dt_scan = std::min(dt_child, dt_default);
-    dt_scan = std::max(dt_scan, dt_floor);
-    if (dt_scan > horizon) dt_scan = horizon;
+    ScanConfig scan = choose_scan_config(req, horizon, body_radius, soi_radius,
+                                         children, child_count, have_radial_range,
+                                         radial_range, root_eps, time_eps);
 
     // --- Step 6: coarse scan loop ---
     double t_lo = req.start_time;
     State2 s_lo = req.initial_state;
-    double f_imp_lo = scan_impact ? eval_impact(s_lo) : 0.0;
-    double f_exit_lo = scan_exit ? eval_exit(s_lo) : 0.0;
+    double f_imp_lo = scan.scan_impact ? eval_impact(s_lo) : 0.0;
+    double f_exit_lo = scan.scan_exit ? eval_exit(s_lo) : 0.0;
     double f_child_lo[kMaxChildrenPerBody];
     for (size_t i = 0; i < child_count; ++i) {
         f_child_lo[i] = eval_child(s_lo, i, t_lo);
@@ -515,7 +556,7 @@ SolveStatus EventDetector::find_next_event(const EventSearchRequest& req,
     while (t_lo < req.time_limit && scan_steps < max_scan_steps) {
         ++scan_steps;
         if (diagnostics_ != nullptr) ++diagnostics_->scan_steps;
-        double t_hi = std::min(t_lo + dt_scan, req.time_limit);
+        double t_hi = std::min(t_lo + scan.dt, req.time_limit);
         State2 s_hi;
         SolveStatus ps = propagator.propagate(t_hi - req.start_time, s_hi);
         if (ps != SolveStatus::Ok || !is_finite_state(s_hi)) {
@@ -560,15 +601,15 @@ SolveStatus EventDetector::find_next_event(const EventSearchRequest& req,
                 ev.from_body = req.central_body;
                 ev.to_body = InvalidBody;
                 ev.state = s_root;
-                consider(ev);
+                candidates.consider(ev, time_eps);
             }
-            if (have_best) out = best;
+            if (candidates.have_best) out = candidates.best;
             else set_time_limit_output();
             return SolveStatus::Ok;
         }
 
         double f_imp_hi = f_imp_lo;
-        if (scan_impact) {
+        if (scan.scan_impact) {
             // --- Impact bracket ---
             f_imp_hi = eval_impact(s_hi);
             auto f_impact_of_t = [&](double t) {
@@ -592,12 +633,13 @@ SolveStatus EventDetector::find_next_event(const EventSearchRequest& req,
             ev.from_body = req.central_body;
             ev.to_body = InvalidBody;
             ev.state = s_root;
-            consider(ev);
+            candidates.consider(ev, time_eps);
         } else if (f_imp_lo > 0.0 && f_imp_hi > 0.0) {
             double t_mid = 0.5 * (t_lo + t_hi);
             double f_mid = f_impact_of_t(t_mid);
             double proximity =
-                std::max({root_eps * 10.0, body_radius, 0.5 * v_sc * dt_scan});
+                std::max({root_eps * 10.0, body_radius,
+                          0.5 * scan.spacecraft_speed * scan.dt});
             bool possible_minimum = f_mid <= f_imp_lo && f_mid <= f_imp_hi;
             bool near_boundary = f_mid <= proximity;
             if (!(possible_minimum && near_boundary)) {
@@ -639,14 +681,14 @@ SolveStatus EventDetector::find_next_event(const EventSearchRequest& req,
                 ev.from_body = req.central_body;
                 ev.to_body = InvalidBody;
                 ev.state = s_event;
-                consider(ev);
+                candidates.consider(ev, time_eps);
             }
             }
         }
         }
 
         double f_exit_hi = f_exit_lo;
-        if (scan_exit) {
+        if (scan.scan_exit) {
             // --- SOI exit bracket ---
             f_exit_hi = eval_exit(s_hi);
             auto f_exit_of_t = [&](double t) {
@@ -670,7 +712,7 @@ SolveStatus EventDetector::find_next_event(const EventSearchRequest& req,
             ev.from_body = req.central_body;
             ev.to_body = parent_id;
             ev.state = s_root;
-            consider(ev);
+            candidates.consider(ev, time_eps);
         } else if (f_exit_lo < 0.0 && f_exit_hi < 0.0) {
             double t_mid = 0.5 * (t_lo + t_hi);
             double f_mid = f_exit_of_t(t_mid);
@@ -717,7 +759,7 @@ SolveStatus EventDetector::find_next_event(const EventSearchRequest& req,
                 ev.from_body = req.central_body;
                 ev.to_body = parent_id;
                 ev.state = s_event;
-                consider(ev);
+                candidates.consider(ev, time_eps);
             }
             }
         }
@@ -748,9 +790,10 @@ SolveStatus EventDetector::find_next_event(const EventSearchRequest& req,
                 ev.from_body = req.central_body;
                 ev.to_body = child.id;
                 ev.state = s_root;
-                consider(ev);
+                candidates.consider(ev, time_eps);
             } else if (f_ch_lo > 0.0 && f_ch_hi > 0.0) {
-                const double half_window_motion = 0.5 * v_rel_max * (t_hi - t_lo);
+                const double half_window_motion =
+                    0.5 * scan.max_relative_speed * (t_hi - t_lo);
                 double proximity =
                     std::max({root_eps * 10.0, child.soi_radius * 0.05,
                               half_window_motion});
@@ -798,7 +841,7 @@ SolveStatus EventDetector::find_next_event(const EventSearchRequest& req,
                     ev.from_body = req.central_body;
                     ev.to_body = child.id;
                     ev.state = s_event;
-                    consider(ev);
+                    candidates.consider(ev, time_eps);
                 }
                 }
                 }
@@ -814,13 +857,13 @@ SolveStatus EventDetector::find_next_event(const EventSearchRequest& req,
 
         // Early termination: if we already have a confirmed event earlier than the
         // current scan position, no later bracket can beat it (scan is time-monotonic).
-        if (have_best && best.time < t_lo - time_eps) {
+        if (candidates.have_best && candidates.best.time < t_lo - time_eps) {
             break;
         }
     }
 
-    if (have_best) {
-        out = best;
+    if (candidates.have_best) {
+        out = candidates.best;
     } else {
         set_time_limit_output();
     }
