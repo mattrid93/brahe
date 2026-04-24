@@ -131,6 +131,13 @@ def build_trajectory(system, req):
     return status, trajectory
 
 
+def make_builder(system):
+    tolerances = brahe.Tolerances()
+    tolerances.root_epsilon = 1e-3
+    tolerances.max_event_refine_iterations = 96
+    return brahe.TrajectoryBuilder(system, tolerances)
+
+
 def segment_records(trajectory):
     return [
         {
@@ -252,6 +259,7 @@ def open_interactive_plot(args):
 
     animation = {
         "system": None,
+        "trajectory": None,
         "samples": None,
         "frame": 0,
         "playing": False,
@@ -261,6 +269,15 @@ def open_interactive_plot(args):
         "body_artists": [],
     }
     timer = fig.canvas.new_timer(interval=args.animation_interval_ms)
+    render_cache = {
+        "moon_mu": None,
+        "moon_orbit_radius": None,
+        "system": None,
+        "builder": None,
+        "status": None,
+        "trajectory": None,
+        "conditions": None,
+    }
 
     def stop_animation():
         animation["playing"] = False
@@ -277,6 +294,9 @@ def open_interactive_plot(args):
             for artist in (marker, soi_circle, label):
                 artist.remove()
         animation["body_artists"] = []
+        animation["system"] = None
+        animation["trajectory"] = None
+        animation["samples"] = None
         time_text.set_text("")
 
     def update_animation_frame(frame):
@@ -315,6 +335,7 @@ def open_interactive_plot(args):
             trajectory, system, samples=frame_count, frame="root"
         )
         animation["system"] = system
+        animation["trajectory"] = trajectory
         animation["samples"] = samples
         animation["frame"] = 0
 
@@ -358,6 +379,23 @@ def open_interactive_plot(args):
         animation["body_artists"] = body_artists
         update_animation_frame(0)
 
+    def get_system_and_builder(moon_mu, moon_orbit_radius):
+        if (
+            render_cache["system"] is None
+            or render_cache["builder"] is None
+            or render_cache["moon_mu"] != moon_mu
+            or render_cache["moon_orbit_radius"] != moon_orbit_radius
+        ):
+            system = make_demo_system(
+                moon_mu=moon_mu,
+                moon_orbit_radius=moon_orbit_radius,
+            )
+            render_cache["moon_mu"] = moon_mu
+            render_cache["moon_orbit_radius"] = moon_orbit_radius
+            render_cache["system"] = system
+            render_cache["builder"] = make_builder(system)
+        return render_cache["system"], render_cache["builder"]
+
     def advance_animation():
         if not animation["playing"]:
             return
@@ -389,12 +427,16 @@ def open_interactive_plot(args):
         req = None
         system = None
         try:
-            system = make_demo_system(
-                moon_mu=conditions["moon_mu"],
-                moon_orbit_radius=conditions["moon_orbit_radius"],
+            system, builder = get_system_and_builder(
+                conditions["moon_mu"], conditions["moon_orbit_radius"]
             )
             req = build_request_from_conditions(conditions)
-            status, trajectory = build_trajectory(system, req)
+            status, trajectory = builder.build_preview(req)
+            if status not in {
+                brahe.SolveStatus.Ok,
+                brahe.SolveStatus.CapacityExceeded,
+            }:
+                raise RuntimeError(f"trajectory build failed: {status!r}")
 
             ax.clear()
             brahe.plot_trajectory(
@@ -405,10 +447,21 @@ def open_interactive_plot(args):
                 show_bodies=False,
                 show_events=True,
             )
-            setup_animation_overlay(system, trajectory)
+            brahe.plot_body_system(
+                system,
+                t=0.0,
+                ax=ax,
+                body_ids=[EARTH_ID, MOON_ID],
+                show_soi=True,
+                show_radius=True,
+                label=True,
+            )
             ax.set_title("Earth-Moon free-return-style trajectory preview")
             ax.legend(loc="upper right", fontsize="small")
             status_text.set_text(format_status(status, trajectory))
+            render_cache["status"] = status
+            render_cache["trajectory"] = trajectory
+            render_cache["conditions"] = conditions
         except Exception as exc:
             log_failure(args.failure_log, conditions, req=req, exc=exc)
             ax.clear()
@@ -422,14 +475,23 @@ def open_interactive_plot(args):
                 f"{type(exc).__name__}: {exc} "
                 f"(logged to {args.failure_log})"
             )
+            render_cache["status"] = None
+            render_cache["trajectory"] = None
+            render_cache["conditions"] = conditions
         fig.canvas.draw_idle()
 
     def toggle_play(_=None):
-        samples = animation["samples"]
-        if not samples:
+        trajectory = render_cache["trajectory"]
+        system = render_cache["system"]
+        if trajectory is None or system is None:
             return
         if animation["playing"]:
             stop_animation()
+            return
+        if animation["samples"] is None:
+            setup_animation_overlay(system, trajectory)
+        samples = animation["samples"]
+        if not samples:
             return
         if animation["frame"] >= len(samples["t"]) - 1:
             update_animation_frame(0)
